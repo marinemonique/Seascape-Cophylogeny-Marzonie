@@ -189,7 +189,8 @@ ggplot(ind_coords_iso, aes(x = Axis1, y = Axis2, color = Reef)) +
 ```{r}
 #adding host cluster so we can add shape by host 
 ind_coords_iso <- ind_coords_iso %>% mutate(HostCluster = case_when(
-    Axis1 < 0 & Axis2 < 0 ~ "IC1",
+    Axis1 < 0 & Axis2 < -10 ~ "IC1",
+    Axis1 < 0 & Axis2 < 0 & Axis2 > -10 ~ "IC1b",
     Axis1 > 0 & Axis2 > 25 ~ "IC2",
     Axis1 > 20 & Axis2 < 0 ~ "IC3",
     TRUE ~ NA_character_  # anything that doesn't match the above
@@ -206,6 +207,7 @@ load("ind_coords_iso.RData")
 # ind_coords_iso <- ind_coords %>%
 #   mutate(isoID = if_else(Axis1 < -80 & Axis2 > -3, "LHCluster", "CSCluster"))
 ind_coords_iso <- ind_coords_iso %>% mutate(HostCluster = case_when(
+    Axis1 < 0 & Axis2 < 0 ~ "IC1",
     Axis1 < 0 & Axis2 < 0 ~ "IC1",
     Axis1 > 0 & Axis2 > 25 ~ "IC2",
     Axis1 > 20 & Axis2 < 0 ~ "IC3",
