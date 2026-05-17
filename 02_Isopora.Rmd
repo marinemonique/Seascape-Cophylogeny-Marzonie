@@ -1,0 +1,830 @@
+---
+title: "02_Isopora"
+author: "Magena Marzonie and Monique White"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Section 1. Data Wrangle
+
+## Load libraries
+```{r}
+library(dplyr)
+library(vcfR)
+library(adegenet)
+library(data.table)
+```
+
+
+## Step 1: Load VCF and fix sample names 
+## Load data
+```{r}
+vcf <- read.vcfR("ISOPORA_variants.vcf")
+
+# Clean sample names
+sample_names <- colnames(vcf@gt)[-1]
+shortened_names <- sub("^([^-]+-[^-]+).*", "\\1", sample_names)
+colnames(vcf@gt)[-1] <- shortened_names
+```
+
+
+##1. QC Filtering - all samples
+###1.1 Convert genotypes to numeric format
+```{r}
+gt <- extract.gt(vcf, element = "GT", as.numeric = FALSE)
+geno_num <- matrix(NA, nrow = nrow(gt), ncol = ncol(gt))
+
+for (i in 1:nrow(gt)) {
+  for (j in 1:ncol(gt)) {
+    g <- gt[i, j]
+    geno_num[i, j] <- ifelse(g %in% c("0/0", "0|0"), 0,
+                       ifelse(g %in% c("0/1", "1/0", "0|1", "1|0"), 1,
+                       ifelse(g %in% c("1/1", "1|1"), 2, NA)))
+  }
+}
+```
+
+
+###1.2 Loci filtering
+```{r}
+# Locus missingness
+missing_per_locus <- rowMeans(is.na(geno_num))
+
+# Minor allele count (MAC)
+mac <- apply(geno_num, 1, function(x) {
+  x <- x[!is.na(x)]
+  # count whichever allele is rarer
+  min(sum(x), 2*length(x) - sum(x))
+})
+
+# Keep loci: missingness ≤ 20%, MAC ≥ 3 (adjust threshold as needed)
+keep_loci <- which(missing_per_locus <= 0.2 & mac >= 3)
+
+# Apply locus filter
+vcf_filtered <- vcf[keep_loci, ]
+
+# Individual filtering
+gt_filtered <- extract.gt(vcf_filtered, element = "GT", as.numeric = FALSE)
+missing_per_ind <- colMeans(is.na(gt_filtered))
+keep_inds <- names(missing_per_ind[missing_per_ind <= 0.5])
+vcf_filtered <- vcf_filtered[, c(TRUE, colnames(gt_filtered) %in% keep_inds)]
+
+# Remove 2020 individuals
+keep_inds <- colnames(vcf_filtered)[-1]
+vcf_filtered <- vcf_filtered[, c(TRUE, !grepl("-20", keep_inds))]
+```
+
+
+###1.3 Genind conversion / Joining metadata
+```{r}
+# Convert VCF to genind
+iso_gen <- vcfR2genind(vcf_filtered)
+
+# Keep only up to "-24" in individual names
+indNames(iso_gen) <- sub("(-24).*", "\\1", indNames(iso_gen))
+
+# Remove individuals with '-20' or '-24b'
+inds_filtered <- indNames(iso_gen)[!grepl("-20|-24b", indNames(iso_gen))]
+iso_gen <- iso_gen[inds_filtered, ]
+
+# Read metadata
+meta <- fread("Iso_Meta2024.csv")
+
+# Clean metadata sample IDs (keep only up to "-24")
+meta_clean <- meta %>%
+  mutate(SampleID = sub("(-24).*", "\\1", trimws(as.character(VialID))))
+
+# Filter and order metadata to match cleaned genind individuals
+meta_ordered <- meta_clean %>%
+  filter(SampleID %in% indNames(iso_gen)) %>%
+  arrange(match(SampleID, indNames(iso_gen)))
+```
+
+
+```{r}
+iso_gen <- vcfR2genind(vcf_filtered)
+
+# Check for match
+inds <- indNames(iso_gen)
+inds_clean <- trimws(inds)
+meta_clean <- meta %>% mutate(SampleID = trimws(as.character(VialID)))
+
+write.csv(x = meta_clean, file ="meta_clean.csv")
+
+# Filter out '-20' samples from inds
+inds_filtered <- inds_clean[!grepl("-20|-24b", inds_clean)]
+
+# Filter metadata to match and remove '-20' individuals
+meta_ordered_iso <- meta_clean %>%
+  filter(SampleID %in% inds_filtered) %>%
+  arrange(match(SampleID, inds_filtered))
+
+# Also update genind object to remove those individuals
+iso_gen_full <- iso_gen[!grepl("-20|-24b", indNames(iso_gen)), ]
+
+# #meta trimmed
+# iso_meta <- read.csv("Acro_Meta2024.csv") %>%
+#   rename(SampleID = VialID)
+# 
+# # Match and merge metadata
+# inds <- indNames(acro_gen_full)
+# meta_trimmed <- merge(data.table(SampleID = inds), acro_meta, by = "SampleID", all.x = TRUE)
+# meta_trimmed <- meta_trimmed[match(inds, meta_trimmed$SampleID), ]
+
+```
+
+
+###Add population level assignments 
+```{r}
+# 3. Ensure metadata rows are ordered to match genind individuals
+# indNames() gives the individual IDs in the genind
+meta <- meta_ordered_iso %>%
+  filter(SampleID %in% indNames(iso_gen_full)) %>%   # keep only samples in genind
+  arrange(match(SampleID, indNames(iso_gen_full)))   # reorder to match genind
+
+# 4. Assign population/reef to genind
+pop_vector <- meta$Reef  
+pop(iso_gen_full) <- as.factor(pop_vector)
+
+# 5. Verify
+table(pop(iso_gen_full))  # should show number of individuals per reef
+
+meta_trimmed <- meta
+save(meta_trimmed, file = "meta_trimmed.RData")
+```
+
+
+```{r}
+save(iso_gen_full, file = "iso_gen_full.RData")
+
+load("iso_gen_full.RData")
+```
+
+```{r}
+coords <- meta[match(indNames(iso_gen_full), meta$SampleID), c("GPS S", "GPS E")]
+```
+
+```{r}
+write.table(coords,
+            file = "coords.txt",
+            sep = "\t",
+            quote = FALSE,
+            row.names = TRUE,
+            col.names = FALSE)
+```
+
+
+
+```{r}
+# Read raw lines
+lines <- readLines("geno_matrix.txt")
+length(lines)      # number of rows
+
+# Check the number of columns per line
+col_counts <- sapply(lines, function(x) length(strsplit(x, "\\s+")[[1]]))
+table(col_counts)  # see the distribution of column counts
+```
+
+```{r}
+save(iso_gen, file = "iso_gen.RData")
+save(meta_ordered_iso, file = "meta_ordered_iso.RData")
+```
+
+# Section 2. PCA
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(vcfR)
+library(adegenet)
+library(data.table)
+```
+
+#Step 8: Save filtered data
+```{r}
+# Save the filtered genind object
+#save(iso_gen, file = "iso_gen.RData")
+
+# View the genind object
+load("iso_gen_full.RData")
+iso_gen_full
+
+#189 individuals, 6,583 loci, 13,293 alleles 
+#187 individuals, 12,380 loci, 25,001 alleles(MW 20/4/26)
+```
+
+##1.4 PCA of genetic variance
+```{r}
+x <- tab(iso_gen_full, NA.method = "mean")
+pca1 <- dudi.pca(x, scannf = FALSE, scale = FALSE, nf = 3)
+
+percent <- pca1$eig / sum(pca1$eig) * 100
+barplot(percent, ylab = "Variance explained (%)", names.arg = round(percent, 1))
+```
+
+##1.5 Prepare PCA coordinates + add population info
+```{r}
+meta_clean <- read.csv("meta_Clean.csv")
+# Extract PCA coordinates
+ind_coords <- as.data.frame(pca1$li)
+
+# Add individual names
+ind_coords$ind <- rownames(ind_coords)
+
+# Add population info directly from genind object
+ind_coords$pop <- iso_gen_full@pop  # already filtered to match individuals
+
+ind_coords <- ind_coords %>% rename(SampleID = ind)
+
+ind_coords$SampleID <- gsub("\\.", "-", ind_coords$SampleID)
+
+ind_coords_iso <- ind_coords %>% left_join(meta_clean, by = "SampleID")
+
+
+save(ind_coords_iso, file = "ind_coords_iso.RData")
+```
+
+
+##1.7 Plot PCA by latitude
+```{r}
+
+load("ind_coords_iso.RData")
+
+library(wesanderson)
+library(ggplot2)
+library(wesanderson)
+
+# Pick your fave Wes Anderson palette (e.g., "Darjeeling1", "Zissou1", "Moonrise1", etc.)
+palette <- wes_palette("Zissou1", n = 100, type = "continuous")
+
+ggplot(ind_coords_iso, aes(x = Axis1, y = Axis2, color = `GPS.S`)) +
+  geom_point(size = 3, alpha = 0.9) +
+  scale_color_gradientn(colors = palette) +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca1$eig[1] / sum(pca1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca1$eig[2] / sum(pca1$eig) * 100, 1), "%)"),
+    color = "Latitude"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.5)
+  )
+
+```
+
+
+```{r}
+wgs_samples <- c(
+"I015-24", "I034-24", "I066-24", "I205-24", "I209-24", "I113-24", "I095-24", "I171-24", "I214-24", "I053-24", "I108-24", "I126-24"
+)
+
+library(dplyr)
+
+ind_coords <- ind_coords %>%
+  mutate(WGS_group = if_else(SampleID %in% wgs_samples,
+                             SampleID,
+                             "Other"))
+
+ind_coords <- ind_coords %>%
+  mutate(
+    WGS_flag = SampleID %in% wgs_samples,
+    SampleID_ordered = factor(SampleID, levels = wgs_samples)
+  )
+```
+
+```{r}
+library(ggplot2)
+library(ggrepel)
+
+ggplot(ind_coords, aes(x = Axis1, y = Axis2)) +
+  
+  # Grey background first
+  geom_point(
+    data = subset(ind_coords, !WGS_flag),
+    color = "grey85",
+    size = 3,
+    alpha = 0.6
+  ) +
+  
+  # WGS samples on top (default ggplot palette)
+  geom_point(
+    data = subset(ind_coords, WGS_flag),
+    aes(color = SampleID_ordered),
+    size = 4
+  ) +
+  
+  # Labels
+  geom_text_repel(
+    data = subset(ind_coords, WGS_flag),
+    aes(label = SampleID, color = SampleID_ordered),
+    size = 3.5,
+    show.legend = FALSE
+  ) +
+  
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  
+  labs(
+    x = paste0("PC1 (", round(pca1$eig[1] / sum(pca1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca1$eig[2] / sum(pca1$eig) * 100, 1), "%)"),
+    color = "WGS Sample"
+  ) +
+  
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.5)
+  )
+```
+
+
+```{r}
+reef_order <- c(
+  "Willis", "Madgelaine", "Herald", "Diamond", "Coringa",
+  "Marion", "Mellish", "Frederick", "Saumarez", "Kenn",
+  "Wreck", "Cato", "GBR", "Elizabeth", "Middleton"
+)
+
+ind_coords_iso$Reef <- factor(ind_coords_iso$Reef, levels = reef_order)
+
+ind_coords_iso <- ind_coords_iso %>% 
+  filter(Reef != "NA")
+
+ggplot(ind_coords_iso, aes(x = Axis1, y = Axis2, color = Reef)) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca1$eig[1] / sum(pca1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca1$eig[2] / sum(pca1$eig) * 100, 1), "%)"),
+    color = "Reef"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.5)
+  )
+
+```
+
+
+
+```{r}
+#adding host cluster so we can add shape by host 
+ind_coords_iso <- ind_coords_iso %>% mutate(HostCluster = case_when(
+    Axis1 < 0 & Axis2 < -10 ~ "IC1",
+    Axis1 < 0 & Axis2 < 0 & Axis2 > -10 ~ "IC1b",
+    Axis1 > 0 & Axis2 > 25 ~ "IC2",
+    Axis1 > 20 & Axis2 < 0 ~ "IC3",
+    TRUE ~ NA_character_  # anything that doesn't match the above
+  ))
+```
+
+
+##2.1 Create dataset for LH and CS
+```{r}
+library(dplyr)
+
+load("ind_coords_iso.RData")
+
+# ind_coords_iso <- ind_coords %>%
+#   mutate(isoID = if_else(Axis1 < -80 & Axis2 > -3, "LHCluster", "CSCluster"))
+ind_coords_iso <- ind_coords_iso %>% mutate(HostCluster = case_when(
+    Axis1 < 0 & Axis2 < 0 ~ "IC1",
+    Axis1 < 0 & Axis2 < 0 ~ "IC1",
+    Axis1 > 0 & Axis2 > 25 ~ "IC2",
+    Axis1 > 20 & Axis2 < 0 ~ "IC3",
+    TRUE ~ NA_character_  # anything that doesn't match the above
+  ))
+
+# Create vectors of SampleIDs for each species based on isoID
+inds_IC1 <- ind_coords_iso$SampleID[ind_coords_iso$HostCluster == "IC1"]
+inds_IC2 <- ind_coords_iso$SampleID[ind_coords_iso$HostCluster == "IC2"]
+inds_IC3 <- ind_coords_iso$SampleID[ind_coords_iso$HostCluster == "IC3"]
+
+# Subset the genind object for each species
+iso_gen_cl1 <- iso_gen_full[inds_IC1, ]
+iso_gen_cl2 <- iso_gen_full[inds_IC2, ]
+iso_gen_cl3 <- iso_gen_full[inds_IC3, ]
+
+
+save(iso_gen_cl1, file = "iso_gen_cl1.RData")
+save(iso_gen_cl2, file = "iso_gen_cl2.RData")
+save(iso_gen_cl3, file = "iso_gen_cl3.RData")
+
+```
+```{r}
+# Custom hex colors for the first 12 reefs
+my_colors <- c(
+  "#d85874", "#ce4f35", "#c78048", "#6db543", "#3e8048",
+  "#63be84", "#43bdc4", "#6486c9", "#7862cc", "#cb87c9",
+  "#c34cae", "#9e496b"
+)
+
+# Reef order (14 reefs total)
+reef_order <- c("Willis", "Madgelaine", "Herald", "Diamond", "Coringa",
+                "Marion", "Mellish", "Frederick", "Saumarez", "Kenn",
+                "Wreck", "Cato", "Elizabeth", "Middleton")
+
+# Assign the custom colors to the first 12 reefs
+custom_palette <- setNames(my_colors, reef_order[1:12])
+
+# Assign custom colors to Elizabeth and Middleton
+custom_palette["Elizabeth"] <- "#c4af46"
+custom_palette["Middleton"] <- "#7a7932"
+
+# Final named palette
+reef_palette <- custom_palette
+
+# View or use reef_palette
+reef_palette
+```
+
+```{r}
+ind_coords_iso$Reef <- factor(ind_coords_iso$Reef, levels = reef_order)
+ind_coords_iso <- ind_coords_iso %>% filter(Reef != "NA")
+ind_coords_iso <- ind_coords_iso %>% filter(Reef != "GBR")
+
+iso_cluster <-  ggplot(ind_coords_iso, aes(x = Axis1, y = Axis2, colour = HostCluster)) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca1$eig[1] / sum(pca1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca1$eig[2] / sum(pca1$eig) * 100, 1), "%)")
+  ) +
+  theme_minimal()
+iso_cluster
+```
+
+```{r}
+ ggsave(iso_cluster,
+        file = "iso_PCA_cluster.PNG",
+        height = 200,
+        width = 189,
+        unit = "mm")
+```
+
+
+#PCA for symbionts
+```{r}
+ind_coords_iso$Reef <- factor(ind_coords_iso$Reef, levels = reef_order)
+ind_coords_iso <- ind_coords_iso %>% filter(Reef != "NA")
+ind_coords_iso <- ind_coords_iso %>% filter(HostCluster != "NA")
+
+
+
+pca.symbiont <- ggplot(ind_coords_iso, aes(x = Axis1, y = Axis2, fill = Reef, shape = HostCluster)) +
+  geom_point(size = 3, alpha = 0.9, color = "black") +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca1$eig[1] / sum(pca1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca1$eig[2] / sum(pca1$eig) * 100, 1), "%)")
+  ) +
+  scale_fill_manual(values = reef_palette) +
+    scale_shape_manual(values = c(21, 22, 23, 24, 25)) +
+  guides(
+    fill = guide_legend(override.aes = list(shape = 21, color = "black")),
+    shape = guide_legend(override.aes = list(fill = "grey70"))  # optional shape legend tweak
+  ) +
+  theme_minimal()
+  
+
+pca.symbiont
+
+```
+
+##2.2 Run PCA for LH and CS 
+```{r}
+# PCA for Lord Howe
+x_cl1 <- tab(iso_gen_cl1 , NA.method = "mean") #issue that PCA requires non-zero variance, and suggests that loci are monomorphic.
+
+#for PCA to work the var cannot be 0
+var_cols <- apply(x_cl1, 2, var, na.rm = TRUE)
+sum(var_cols == 0, na.rm=TRUE)  # monomorphic loci
+
+
+# remove loci with zero variance (to get PCA to work)
+x_cl1 <- x_cl1[, !is.na(var_cols) & var_cols > 0]
+
+pca_cl1 <- dudi.pca(x_cl1, scannf = FALSE, scale = FALSE, nf = 3)
+# # check for remaining NA 
+# sum(is.na(x_cl1))
+
+# PCA for Coral Sea 
+x_cl2 <- tab(iso_gen_cl2, NA.method = "mean")
+pca_cl2 <- dudi.pca(x_cl2, scannf = FALSE, scale = FALSE, nf = 3)
+
+
+# IC3
+x_cl3 <- tab(iso_gen_cl3, NA.method = "mean")
+pca_cl3 <- dudi.pca(x_cl3, scannf = FALSE, scale = FALSE, nf = 3)
+```
+##2.3 Merge coords and meta
+```{r}
+#load meta ordered
+meta_ordered_iso <- load("meta_ordered_iso.RData")
+
+# For CL1
+ind_coords_cl1 <- as.data.frame(pca_cl1$li)
+ind_coords_cl1$SampleID <- rownames(ind_coords_cl1)
+ind_coords_cl1 <- left_join(ind_coords_cl1, meta_ordered, by = "SampleID")
+save(ind_coords_cl1, file = "ind_coords_cl1.RData")
+# For CL2
+ind_coords_cl2 <- as.data.frame(pca_cl2$li)
+ind_coords_cl2$SampleID <- rownames(ind_coords_cl2)
+ind_coords_cl2 <- left_join(ind_coords_cl2, meta_ordered, by = "SampleID")
+save(ind_coords_cl2, file = "ind_coords_cl2.RData")
+
+# CL3
+ind_coords_cl3 <- as.data.frame(pca_cl3$li)
+ind_coords_cl3$SampleID <- rownames(ind_coords_cl3)
+ind_coords_cl3 <- left_join(ind_coords_cl3, meta_ordered, by = "SampleID")
+save(ind_coords_cl3, file = "ind_coords_cl3.RData")
+```
+##2.4 CL1 PCA
+```{r}
+library(tidyverse)
+reef_order <- c("Willis", "Madgelaine", "Herald", "Diamond", "Coringa",
+  "Marion", "Mellish", "Frederick", "Saumarez", "Kenn",
+  "Wreck", "Cato", "GBR", "Elizabeth", "Middleton")
+
+ind_coords_cl1$Reef <- factor(ind_coords_cl1$Reef, levels = reef_order)
+
+ind_coords_cl1 <- ind_coords_cl1 %>% filter(Reef != "NA") %>% filter(Reef != "GBR") %>% filter(Reef != "Frederick") %>% filter(Reef != "Wreck")
+
+pca_cl1 <- ggplot(ind_coords_cl1, aes(x = Axis1, y = Axis2, color = Reef)) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca_cl1$eig[1] / sum(pca_cl1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca_cl1$eig[2] / sum(pca_cl1$eig) * 100, 1), "%)"),
+    color = "Reef"
+  ) +
+  scale_color_manual(values = reef_palette) +   
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.5)
+  )
+
+pca_cl1
+```
+
+
+##2.6 CL2
+```{r}
+reef_order <- c("Willis", "Madgelaine", "Herald", "Diamond", "Coringa",
+  "Marion", "Mellish", "Frederick", "Saumarez", "Kenn",
+  "Wreck", "Cato", "GBR", "Elizabeth", "Middleton")
+
+ind_coords_cl2$Reef <- factor(ind_coords_cl2$Reef, levels = reef_order)
+
+ind_coords_cl2 <- ind_coords_cl2 %>% filter(Reef != "NA")
+
+pca_cl2 <- ggplot(ind_coords_cl2, aes(x = Axis1, y = Axis2, color = Reef)) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca_cl2$eig[1] / sum(pca_cl2$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca_cl2$eig[2] / sum(pca_cl2$eig) * 100, 1), "%)"),
+    color = "Reef"
+  ) +
+  scale_color_manual(values = reef_palette) + 
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.5)
+  )
+
+pca_cl2
+```
+
+#CL3
+```{r}
+library(tidyverse)
+reef_order <- c("Willis", "Madgelaine", "Herald", "Diamond", "Coringa",
+  "Marion", "Mellish", "Frederick", "Saumarez", "Kenn",
+  "Wreck", "Cato", "GBR", "Elizabeth", "Middleton")
+
+ind_coords_cl3$Reef <- factor(ind_coords_cl3$Reef, levels = reef_order)
+
+ind_coords_cl3 <- ind_coords_cl3 %>% filter(Reef != "NA") %>% filter(Reef != "GBR") %>% filter(Reef != "Frederick") %>% filter(Reef != "Wreck")
+
+pca_cl3 <- ggplot(ind_coords_cl3, aes(x = Axis1, y = Axis2, color = Reef)) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca_cl3$eig[1] / sum(pca_cl3$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca_cl3$eig[2] / sum(pca_cl3$eig) * 100, 1), "%)"),
+    color = "Reef"
+  ) +
+  scale_color_manual(values = reef_palette) +   
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.5)
+  )
+
+pca_cl3
+```
+
+
+```{r}
+#How many total individuals 
+#How many per reef
+# Total count
+total_individuals <- ind_coords_iso %>%
+  summarise(n_total = n())
+
+print(total_individuals)
+
+# Count per reef
+individuals_per_reef <- ind_coords_iso %>%
+  group_by(Reef) %>%
+  summarise(n_individuals = n()) 
+
+print(individuals_per_reef)
+```
+
+
+
+##More investigations on missingness
+
+
+
+Step 3: Filter loci by missing data and MAF 
+```{r}
+# Keep loci with ≤20% missing data
+missing_per_locus <- apply(geno_num, 1, function(x) mean(is.na(x)))
+keep_loci_miss <- which(missing_per_locus <= 0.2)
+
+# Keep loci with MAF ≥ 0.05
+maf <- apply(geno_num, 1, function(x) {
+  x <- x[!is.na(x)]
+  p <- mean(x) / 2
+  min(p, 1 - p)
+})
+keep_loci_maf <- which(maf >= 0.05)
+
+# Apply locus filters
+keep_loci <- intersect(keep_loci_miss, keep_loci_maf)
+vcf_loci_filtered <- vcf[keep_loci, ]
+```
+
+
+Step 4: Filter individuals by missing data
+```{r}
+# Re-extract the genotype matrix after filtering
+gt_filtered <- extract.gt(vcf_loci_filtered, element = "GT", as.numeric = FALSE)
+
+# Filter by missing data per individual
+missing_per_ind <- apply(gt_filtered, 2, function(x) mean(is.na(x)))
+keep_inds <- names(missing_per_ind[missing_per_ind <= 0.5])
+
+# Keep only the selected individuals and FORMAT column
+vcf_final <- vcf_loci_filtered[, c(TRUE, colnames(gt_filtered) %in% keep_inds)]
+```
+
+
+```{r}
+library(tibble)
+library(ggplot2)
+
+# Create a tibble of individuals and missingness
+missing_df <- tibble(
+  Individual = names(missing_per_ind),
+  MissingPercent = missing_per_ind * 100
+)
+```
+
+
+```{r}
+ggplot(missing_df, aes(x = MissingPercent)) +
+  geom_histogram(bins = 30, fill = "tomato", color = "black") +
+  theme_minimal() +
+  labs(
+    title = "Missing Genotype Data per Individual",
+    x = "% Missing Genotypes",
+    y = "Number of Individuals"
+  ) +
+  geom_vline(xintercept = 50, linetype = "dashed", color = "red") +
+  annotate("text", x = 52, y = max(table(cut(missing_df$MissingPercent, breaks=30))), 
+           label = "50% threshold", hjust = 0, color = "red", size = 3.5)
+```
+
+
+```{r}
+# Missing data per locus
+missing_per_locus <- apply(gt_filtered, 1, function(x) mean(is.na(x)))
+
+locus_df <- tibble(
+  Locus = rownames(gt_filtered),
+  MissingPercent = missing_per_locus * 100
+)
+
+ggplot(locus_df, aes(x = MissingPercent)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "black") +
+  theme_minimal() +
+  labs(
+    title = "Missing Genotype Data per Locus",
+    x = "% Missing Genotypes",
+    y = "Number of Loci"
+  ) +
+  geom_vline(xintercept = 10, linetype = "dashed", color = "red") +
+  annotate("text", x = 12, y = max(table(cut(locus_df$MissingPercent, breaks=30))), 
+           label = "10% threshold", hjust = 0, color = "red", size = 3.5)
+```
+
+
+
+
+```{r}
+# If you're using a genind object:
+missing_per_ind <- apply(is.na(iso_gen@tab), 1, mean)
+
+# Or if you're using a genotype matrix (like from extract.gt)
+missing_per_ind <- apply(gt_filtered, 2, function(x) mean(is.na(x)))
+
+# Convert to % missing
+missing_per_ind <- missing_per_ind * 100
+```
+
+```{r}
+# Check that rownames match
+head(rownames(ind_coords))
+head(names(missing_per_ind))
+
+# Add missingness to the PCA dataframe
+ind_coords$Missingness <- missing_per_ind[ind_coords$SampleID]
+```
+
+```{r}
+pca_missing <- ggplot(ind_coords, aes(x = Axis1, y = Axis2, color = Missingness)) +
+  geom_point(size = 3, alpha = 0.9) +
+  scale_color_viridis_c(option = "plasma", end = 0.9, na.value = "grey80") +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca1$eig[1] / sum(pca1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca1$eig[2] / sum(pca1$eig) * 100, 1), "%)"),
+    color = "% Missing Data"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.5)
+  )
+
+pca_missing
+
+```
+
+
+
+```{r}
+library(plotly)
+
+# add tooltip aesthetics
+pca.symbiont <- ggplot(ind_coords_iso, 
+                       aes(x = Axis1, y = Axis2, 
+                           fill = Reef, 
+                           shape = HostCluster,
+                           text = paste0(
+                             "Sample: ", SampleID, "<br>",
+                             "Population: ", Reef, "<br>",
+                             "Host Cluster: ", HostCluster
+                           ))) +
+  geom_point(size = 3, alpha = 0.9, color = "black") +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca1$eig[1] / sum(pca1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca1$eig[2] / sum(pca1$eig) * 100, 1), "%)")
+  ) +
+  scale_fill_manual(values = reef_palette) +
+  scale_shape_manual(values = c(21, 22, 23, 24, 25)) +
+  guides(
+    fill = guide_legend(override.aes = list(shape = 21, color = "black")),
+    shape = guide_legend(override.aes = list(fill = "grey70"))
+  ) +
+  theme_minimal()
+
+# make interactive with custom tooltip
+pca.symbiont.interactive <- ggplotly(pca.symbiont, tooltip = "text")
+
+pca.symbiont.interactive
+```
+
+# Section 3. Genetic Diversity Stats
