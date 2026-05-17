@@ -1,0 +1,800 @@
+---
+title: "04_P_damicornis"
+author: "Magena Marzonie and Monique White"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Section 1. Data Wrangle
+#Load packages
+```{r}
+library(dplyr)
+library(vcfR)
+library(adegenet)
+library(data.table)
+```
+
+
+
+```{r}
+vcf <- read.vcfR("pdam_variants.vcf")
+
+# Clean sample names
+sample_names <- colnames(vcf@gt)[-1]
+shortened_names <- sub("^([^-]+-[^-]+).*", "\\1", sample_names)
+colnames(vcf@gt)[-1] <- shortened_names
+```
+
+
+```{r}
+gt <- extract.gt(vcf, element = "GT", as.numeric = FALSE)
+geno_num <- matrix(NA, nrow = nrow(gt), ncol = ncol(gt))
+
+for (i in 1:nrow(gt)) {
+  for (j in 1:ncol(gt)) {
+    g <- gt[i, j]
+    geno_num[i, j] <- ifelse(g %in% c("0/0", "0|0"), 0,
+                       ifelse(g %in% c("0/1", "1/0", "0|1", "1|0"), 1,
+                       ifelse(g %in% c("1/1", "1|1"), 2, NA)))
+  }
+}
+```
+
+
+##1.2 Loci filtering
+```{r}
+## 1.2 Loci filtering
+
+# Locus missingness
+missing_per_locus <- rowMeans(is.na(geno_num))
+
+# Minor allele count (MAC)
+mac <- apply(geno_num, 1, function(x) {
+  x <- x[!is.na(x)]
+  # count whichever allele is rarer
+  min(sum(x), 2*length(x) - sum(x))
+})
+
+# Keep loci: missingness ≤ 20%, MAC ≥ 3 (adjust threshold as needed)
+keep_loci <- which(missing_per_locus <= 0.2 & mac >= 3)
+
+# Apply locus filter
+vcf_filtered <- vcf[keep_loci, ]
+
+# Individual filtering
+gt_filtered <- extract.gt(vcf_filtered, element = "GT", as.numeric = FALSE)
+missing_per_ind <- colMeans(is.na(gt_filtered))
+keep_inds <- names(missing_per_ind[missing_per_ind <= 0.5])
+vcf_filtered <- vcf_filtered[, c(TRUE, colnames(gt_filtered) %in% keep_inds)]
+
+# Remove 2020 individuals
+keep_inds <- colnames(vcf_filtered)[-1]
+vcf_filtered <- vcf_filtered[, c(TRUE, !grepl("-20", keep_inds))]
+```
+
+#Merge with Metadata
+```{r}
+pdam_gen <- vcfR2genind(vcf_filtered)
+
+# Read metadata
+meta <- fread("merged_metadata.csv")
+
+# Check for match
+inds <- indNames(pdam_gen)
+inds_clean <- trimws(inds)
+meta_clean <- meta %>% mutate(SampleID = trimws(as.character(SampleID)))
+
+# Filter out '-20' samples from inds
+inds_filtered <- inds_clean[!grepl("-20|-24b", inds_clean)]
+
+
+# Filter metadata to match and remove '-20' individuals
+meta_ordered_pdam <- meta_clean %>%
+  filter(SampleID %in% inds_filtered) %>%
+  arrange(match(SampleID, inds_filtered))
+
+# Also update genind object to remove those individuals
+pdam_gen <- pdam_gen[!grepl("-20|-24b", indNames(pdam_gen)), ]
+
+
+```
+
+
+##Add population level assignments 
+```{r}
+# 3. Ensure metadata rows are ordered to match genind individuals
+# indNames() gives the individual IDs in the genind
+meta <- meta_ordered_pdam %>%
+  filter(SampleID %in% indNames(pdam_gen)) %>%   # keep only samples in genind
+  arrange(match(SampleID, indNames(pdam_gen)))   # reorder to match genind
+
+# 4. Assign population/reef to genind
+pop(pdam_gen) <- as.factor(meta$Reef)
+
+# 5. Verify
+table(pop(pdam_gen))  # should show number of individuals per reef
+```
+
+```{r}
+pdam_gen_full <- pdam_gen
+save(pdam_gen_full, file = "pdam_gen_full.RData")
+save(meta_ordered_pdam, file = "meta_ordered_pdam.RData")
+```
+
+
+# Section 2. PCA
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(vcfR)
+library(adegenet)
+library(data.table)
+
+load("pdam_gen_full.RData")
+load("meta_ordered_pdam.RData")
+```
+
+
+```{r}
+x <- tab(pdam_gen_full, NA.method = "mean")
+pca1 <- dudi.pca(x, scannf = FALSE, scale = FALSE, nf = 3)
+
+percent <- pca1$eig / sum(pca1$eig) * 100
+barplot(percent, ylab = "Variance explained (%)", names.arg = round(percent, 1))
+```
+
+#Prepare PCA coordinates + add population info
+```{r}
+# Extract PCA coordinates
+ind_coords <- as.data.frame(pca1$li)
+
+# Add individual names
+ind_coords$ind <- rownames(ind_coords)
+
+# Add population info directly from genind object
+ind_coords$pop <- pdam_gen_full@pop  # already filtered to match individuals
+
+ind_coords <- ind_coords %>% rename(SampleID = ind)
+
+ind_coords <- ind_coords %>% left_join(meta_clean, by = "SampleID")
+```
+
+
+```{r}
+# Custom hex colors for the first 12 reefs
+my_colors <- c(
+  "#d85874", "#ce4f35", "#c78048", "#6db543", "#3e8048",
+  "#63be84", "#43bdc4", "#6486c9", "#7862cc", "#cb87c9",
+  "#c34cae", "#9e496b"
+)
+
+# Reef order (14 reefs total)
+reef_order <- c("Willis", "Madgelaine", "Herald", "Diamond", "Coringa",
+                "Marion", "Mellish", "Frederick", "Saumarez", "Kenn",
+                "Wreck", "Cato", "Elizabeth", "Middleton")
+
+# Assign the custom colors to the first 12 reefs
+custom_palette <- setNames(my_colors, reef_order[1:12])
+
+# Assign custom colors to Elizabeth and Middleton
+custom_palette["Elizabeth"] <- "#c4af46"
+custom_palette["Middleton"] <- "#7a7932"
+
+# Final named palette
+reef_palette <- custom_palette
+
+# View or use reef_palette
+reef_palette
+```
+
+##2.6 Coral Sea PCA - reef
+```{r}
+library(ggplot2)
+reef_order <- c("Willis", "Madgelaine", "Herald", "Diamond", "Coringa",
+  "Marion", "Mellish", "Frederick", "Saumarez", "Kenn",
+  "Wreck", "Cato", "GBR", "Elizabeth", "Middleton")
+
+ind_coords$Reef <- factor(ind_coords$Reef, levels = reef_order)
+
+ind_coords <- ind_coords %>% filter(Reef != "NA")
+
+save(ind_coords, file = "ind_coords.RData")
+
+pca.dam <- ggplot(ind_coords, aes(x = Axis1, y = Axis2, color = Reef)) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca1$eig[1] / sum(pca1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca1$eig[2] / sum(pca1$eig) * 100, 1), "%)"),
+    color = "Reef"
+  ) +
+  scale_color_manual(values = reef_palette) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.5)
+  )
+
+pca.dam
+```
+
+#PCA with WGS samples highlighted
+
+```{r}
+wgs_samples <- c(
+"A025-24", "A035-24", "A235-24","A052-24", "A196-24", "A066-24", "A214-24", "A334-24", "A342-24", "A353-24", "A100-24", "A115-24", "A277-24", "A290-24",
+"I015-24", "I034-24", "I066-24", "I205-24", "I209-24", "I113-24", "I095-24", "I171-24", "I214-24", "I053-24", "I108-24", "I126-24",
+"M124-24", "M132-24", "M229-24", "M047-24", "M228-24", "M128-24", "M027-24", "M069-24", "M102-24", "M107-24", "M111-24", "M224-24", "M186-24","M247-24", "M263-24",
+"PD046-24", "PD036-24", "PD141-24", "PV119-24", "PV167-24","PV286-24", "PV314-24", "PM124-24", "PM384-24", "PM471-24"
+)
+
+library(dplyr)
+
+ind_coords <- ind_coords %>%
+  mutate(WGS = if_else(SampleID %in% wgs_samples, "yes", "no")) %>% 
+  mutate(WGS = as.factor(WGS))
+```
+
+
+```{r}
+ggplot(ind_coords, aes(x = Axis1, y = Axis2)) +
+  geom_point(
+    data = subset(ind_coords, WGS == "no"),
+    aes(color = WGS),
+    size = 3, alpha = 0.9
+  ) +
+  geom_point(
+    data = subset(ind_coords, WGS == "yes"),
+    aes(color = WGS),
+    size = 3, alpha = 0.9
+  ) +
+  scale_color_manual(
+    values = c("no" = "grey70", "yes" = "darkred")
+  ) +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca1$eig[1] / sum(pca1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca1$eig[2] / sum(pca1$eig) * 100, 1), "%)"),
+    color = "WGS"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.5)
+  )
+```
+
+```{r}
+#adding host cluster so we can add shape by host 
+ind_coords <- ind_coords %>% mutate(HostCluster = case_when(
+    Axis1 < 0  ~ "PDC1",
+    Axis1 > 0 ~ "PDC2",
+    TRUE ~ NA_character_  # anything that doesn't match the above
+  ))
+
+ind_coords_pdam <- ind_coords
+```
+
+```{r}
+pdam_cluster <-  ggplot(ind_coords_pdam, aes(x = Axis1, y = Axis2, colour = HostCluster)) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca1$eig[1] / sum(pca1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca1$eig[2] / sum(pca1$eig) * 100, 1), "%)")
+  ) +
+  theme_minimal()
+pdam_cluster
+```
+```{r}
+ ggsave(pdam_cluster,
+        file = "pdam_PCA_cluster.PNG",
+        height = 189,
+        width = 189,
+        unit = "mm")
+```
+
+## save Cluster ind_coords
+
+```{r}
+# Create vectors of SampleIDs for each species based on pdamID
+inds_PDC1 <- ind_coords_pdam$SampleID[ind_coords_pdam$HostCluster == "PDC1"]
+inds_PDC2 <- ind_coords_pdam$SampleID[ind_coords_pdam$HostCluster == "PDC2"]
+
+
+# Subset the genind object for each species
+pdam_gen_PDC1 <- pdam_gen_full[inds_PDC1, ]
+pdam_gen_PDC2 <- pdam_gen_full[inds_PDC2, ]
+
+
+
+save(pdam_gen_PDC1, file = "pdam_gen_PDC1.RData")
+save(pdam_gen_PDC2, file = "pdam_gen_PDC2.RData")
+```
+
+```{r}
+# PCA for Lord Howe
+x_PDC1 <- tab(pdam_gen_PDC1 , NA.method = "mean") #issue that PCA requires non-zero variance, and suggests that loci are monomorphic.
+
+#for PCA to work the var cannot be 0
+var_cols <- apply(x_PDC1, 2, var, na.rm = TRUE)
+sum(var_cols == 0, na.rm=TRUE)  # monomorphic loci
+
+
+# remove loci with zero variance (to get PCA to work)
+x_PDC1 <- x_PDC1[, !is.na(var_cols) & var_cols > 0]
+
+pca_PDC1 <- dudi.pca(x_PDC1, scannf = FALSE, scale = FALSE, nf = 3)
+# # check for remaining NA 
+# sum(is.na(x_PDC1))
+
+# PCA for Coral Sea 
+x_PDC2 <- tab(pdam_gen_PDC2, NA.method = "mean")
+pca_PDC2 <- dudi.pca(x_PDC2, scannf = FALSE, scale = FALSE, nf = 3)
+
+```
+
+```{r}
+# For PDC1
+ind_coords_PDC1 <- as.data.frame(pca_PDC1$li)
+ind_coords_PDC1$SampleID <- rownames(ind_coords_PDC1)
+ind_coords_PDC1 <- left_join(ind_coords_PDC1, meta_ordered_pdam, by = "SampleID")
+save(ind_coords_PDC1, file = "ind_coords_PDC1.RData")
+# For PDC2
+ind_coords_PDC2 <- as.data.frame(pca_PDC2$li)
+ind_coords_PDC2$SampleID <- rownames(ind_coords_PDC2)
+ind_coords_PDC2 <- left_join(ind_coords_PDC2, meta_ordered_pdam, by = "SampleID")
+save(ind_coords_PDC2, file = "ind_coords_PDC2.RData")
+
+
+```
+
+```{r}
+library(plotly)
+
+# add tooltip aesthetics
+pca.symbiont <- ggplot(ind_coords, 
+                       aes(x = Axis1, y = Axis2, 
+                           fill = Reef, 
+                           shape = HostCluster,
+                           text = paste0(
+                             "Sample: ", SampleID, "<br>",
+                             "Population: ", Reef, "<br>",
+                             "Host Cluster: ", HostCluster
+                           ))) +
+  geom_point(size = 3, alpha = 0.9, color = "black") +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca1$eig[1] / sum(pca1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca1$eig[2] / sum(pca1$eig) * 100, 1), "%)")
+  ) +
+  scale_fill_manual(values = reef_palette) +
+  scale_shape_manual(values = c(21, 22, 23, 24, 25)) +
+  guides(
+    fill = guide_legend(override.aes = list(shape = 21, color = "black")),
+    shape = guide_legend(override.aes = list(fill = "grey70"))
+  ) +
+  theme_minimal()
+
+# make interactive with custom tooltip
+pca.symbiont.interactive <- ggplotly(pca.symbiont, tooltip = "text")
+
+pca.symbiont.interactive
+```
+
+```{r}
+#How many total individuals 
+#How many per reef
+# Total count
+total_individuals <- ind_coords %>%
+  summarise(n_total = n())
+
+print(total_individuals)
+
+# Count per reef
+individuals_per_reef <- ind_coords %>%
+  group_by(Reef) %>%
+  summarise(n_individuals = n()) 
+
+print(individuals_per_reef)
+```
+
+# Section 3. Genetic Diversity Stats
+#Load Libraries
+```{r}
+# packages you'll need
+library(tidyverse)
+library(vroom)      # fast reading
+library(vcfR)       # if working with VCF directly
+library(adegenet)   # PCA on genotypes (if using genind)
+library(lfmm)       # or lfmm2 (install from CRAN/Bioconductor)
+library(vegan)      # RDA / partial RDA
+library(car)        # vif
+library(qqman)      # manhattan
+library(hierfstat)
+library(dplyr)
+```
+
+Population statistics 
+
+#Load data
+```{r}
+load("pdam_gen_full.RData")
+load("pdam_gen_PDC1.RData")
+load("pdam_gen_PDC2.RData")
+pdam_gen_PDC1
+pdam_gen_PDC2
+
+
+# Keep only individuals that do NOT contain '24b' (case-insensitive just in case)
+pdam_gen_full <- pdam_gen_full[!grepl("24b", indNames(pdam_gen), ignore.case = TRUE), ]
+
+# Keep only the part up to "-24"
+clean_names <- sub("(-24).*", "\\1", indNames(pdam_gen_full))
+indNames(pdam_gen_full) <- clean_names
+```
+
+```{r}
+load("meta_ordered_pdam.RData")
+
+meta_ordered_pdam <- meta_ordered_pdam %>%  
+  mutate(MarinePark = case_when(
+    Reef %in% c("Elizabeth", "Middleton") ~ "LH",
+    !Reef %in% c("Elizabeth", "Middleton") ~ "CS"
+  ))
+```
+
+# PDC1
+## 1.1 Heterozygosity (Ho)
+```{r}
+pop_vector <- meta_ordered_pdam$MarinePark #extract pop info 
+pop_vector <- pop_vector[1:nInd(pdam_gen_PDC1)]  #fixing mismatch issue between dataframes 
+pop(pdam_gen_PDC1) <- as.factor(pop_vector) #assigns vector as pop info into the genind object 
+
+
+#Here we are calculating basic stats using hierfstat
+basic_pdam <- basic.stats(pdam_gen_PDC1, diploid = TRUE)
+
+# Mean observed heterozygosity per site
+Ho_pdam = apply(basic_pdam$Ho, MARGIN = 2, FUN = mean, na.rm = TRUE) %>%
+  round(digits = 3)
+Ho_pdam
+```
+
+## 1.2 Heterozygosity (He)
+```{r}
+# Mean expected heterozygosity per site
+He_pdam = apply(basic_pdam$Hs, MARGIN = 2, FUN = mean, na.rm = TRUE) %>%
+  round(digits = 3)
+He_pdam
+```
+
+#Mean Ho and He pdamss populations
+```{r}
+# Mean Ho and He per population
+mean_Ho <- apply(basic_pdam$Ho, 2, mean, na.rm = TRUE)
+mean_He <- apply(basic_pdam$Hs, 2, mean, na.rm = TRUE)
+
+round(cbind(mean_Ho, mean_He), 3)
+```
+
+
+##1.3 Inbreeding 
+```{r}
+apply(basic_pdam$Fis, MARGIN = 2, FUN = mean, na.rm = TRUE) %>%
+  round(digits = 3)
+```
+
+```{r}
+library(ggplot2)
+library(tidyr)
+
+fis_df <- as.data.frame(basic_pdam$Fis)
+fis_long <- pivot_longer(fis_df, cols = everything(), names_to = "Population", values_to = "Fis")
+
+ggplot(fis_long, aes(x = Fis)) +
+  geom_histogram(bins = 50, fill = "skyblue", color = "black") +
+  facet_wrap(~ Population, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "Distribution of per-locus FIS per population")
+```
+
+# PDC2
+## 1.1 Heterozygosity (Ho)
+```{r}
+
+pop_vector <- meta_ordered_pdam$MarinePark #extract pop info 
+pop_vector <- pop_vector[1:nInd(pdam_gen_PDC2)]  #fixing mismatch issue between dataframes 
+pop(pdam_gen_PDC2) <- as.factor(pop_vector) #assigns vector as pop info into the genind object 
+
+
+#Here we are calculating basic stats using hierfstat
+basic_pdam <- basic.stats(pdam_gen_PDC2, diploid = TRUE)
+
+# Mean observed heterozygosity per site
+Ho_pdam = apply(basic_pdam$Ho, MARGIN = 2, FUN = mean, na.rm = TRUE) %>%
+  round(digits = 3)
+Ho_pdam
+```
+
+## 1.2 Heterozygosity (He)
+```{r}
+# Mean expected heterozygosity per site
+He_pdam = apply(basic_pdam$Hs, MARGIN = 2, FUN = mean, na.rm = TRUE) %>%
+  round(digits = 3)
+He_pdam
+```
+
+#Mean Ho and He pdamss populations
+```{r}
+# Mean Ho and He per population
+mean_Ho <- apply(basic_pdam$Ho, 2, mean, na.rm = TRUE)
+mean_He <- apply(basic_pdam$Hs, 2, mean, na.rm = TRUE)
+
+round(cbind(mean_Ho, mean_He), 3)
+```
+
+
+##1.3 Inbreeding 
+```{r}
+apply(basic_pdam$Fis, MARGIN = 2, FUN = mean, na.rm = TRUE) %>%
+  round(digits = 3)
+```
+
+```{r}
+library(ggplot2)
+library(tidyr)
+
+fis_df <- as.data.frame(basic_pdam$Fis)
+fis_long <- pivot_longer(fis_df, cols = everything(), names_to = "Population", values_to = "Fis")
+
+ggplot(fis_long, aes(x = Fis)) +
+  geom_histogram(bins = 50, fill = "skyblue", color = "black") +
+  facet_wrap(~ Population, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "Distribution of per-locus FIS per population")
+```
+#Add population info to 
+```{r}
+pop_vector <- meta_clean$Reef #extract pop info 
+pop_vector <- pop_vector[1:nInd(pdam_gen)]  #fixing mismatch issue between dataframes 
+pop(pdam_gen) <- as.factor(pop_vector) #assigns vector as pop info into the genind object 
+
+pdam_gen <- pdam_gen[!is.na(pop(pdam_gen)), ]
+```
+
+
+## 2.1 Heterozygosity (Ho)
+```{r}
+#Here we are calculating basic stats using hierfstat
+basic_pdam = basic.stats(pdam_gen, diploid = TRUE)
+
+# Mean observed heterozygosity per site
+Ho_pdam = apply(basic_pdam$Ho, MARGIN = 2, FUN = mean, na.rm = TRUE) %>%
+  round(digits = 3)
+Ho_pdam
+
+
+```
+
+## 2.2 Heterozygosity (He)
+```{r}
+# Mean expected heterozygosity per site
+He_pdam = apply(basic_pdam$Hs, MARGIN = 2, FUN = mean, na.rm = TRUE) %>%
+  round(digits = 3)
+He_pdam
+
+```
+
+
+```{r}
+# Create a data.frame of site names, Ho and He and then convert to long format
+Het_pdam_df = data.frame(Site = names(Ho_pdam), Ho = Ho_pdam, He = He_pdam) %>%
+  melt(id.vars = "Site")
+
+# Custom theme for ggplot2
+custom_theme = theme(
+  axis.text.x = element_text(size = 10, angle = 90, vjust = 0.5, face = "bold"),
+  axis.text.y = element_text(size = 10),
+  axis.title.y = element_text(size = 12),
+  axis.title.x = element_blank(),
+  axis.line.y = element_line(size = 0.5),
+  legend.title = element_blank(),
+  legend.text = element_text(size = 12),
+  panel.grid = element_blank(),
+  panel.background = element_blank(),
+  plot.title = element_text(hjust = 0.5, size = 15, face="bold")
+  )
+
+# Italic label
+hetlab.o = expression(italic("H")[o])
+hetlab.e = expression(italic("H")[e])
+
+# pdampora heterozygosity barplot
+ggplot(data = Het_pdam_df, aes(x = Site, y = value, fill = variable))+
+  geom_bar(stat = "identity", position = position_dodge(width = 0.6), colour = "black")+
+  scale_y_continuous(expand = c(0,0), limits = c(0,0.8), breaks = c(0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8))+
+  scale_fill_manual(values = c("pink", "#bdbdbd"), labels = c(hetlab.o, hetlab.e))+
+  ylab("Heterozygosity")+
+  ggtitle("Pocillopora Damicornis")+
+  custom_theme
+```
+
+
+##2.6 Calculate Fst
+```{r}
+#using hierfstat package here. 
+#compute pairwise Fst values. Returns pairwise distances following Weir & Cockerham 1984 
+pdam_fst = genet.dist(pdam_gen, method = "WC84") %>% round(digits = 3)
+pdam_fst
+
+save(pdam_fst, file = "pdam_fst.RData")
+
+  #Elizabeth Middleton Frederick  Cato Wreck Marion  Kenn Mellish Flinders Moore Saumarez Willis
+#Middleton      0.005                                                                                    
+#Frederick      0.252     0.267                                                                          
+#Cato           0.285     0.298     0.025                                                                
+#Wreck          0.273     0.286     0.020 0.003                                                          
+#Marion         0.279     0.290     0.029 0.034 0.033                                                    
+#Kenn           0.269     0.283     0.005 0.020 0.012  0.037                                             
+#Mellish        0.283     0.293     0.032 0.046 0.045  0.040 0.046                                       
+#Flinders       0.298     0.311     0.020 0.045 0.034  0.029 0.033   0.027                               
+#Moore          0.300     0.313     0.015 0.054 0.035  0.045 0.020   0.058    0.035                      
+#Saumarez       0.145     0.162     0.038 0.063 0.060  0.063 0.047   0.068    0.049 0.040                
+#Willis         0.292     0.305     0.026 0.040 0.038  0.030 0.045   0.015    0.023 0.063    0.067       
+#Madgelaine     0.289     0.302     0.024 0.036 0.034  0.025 0.039   0.014    0.015 0.057    0.063  0.002
+#Diamond        0.280     0.291     0.021 0.028 0.028  0.010 0.035   0.020    0.024 0.051    0.061  0.011
+#Coringa        0.288     0.299     0.030 0.040 0.040  0.031 0.049   0.014    0.027 0.069    0.072  0.003
+#Herald         0.291     0.304     0.012 0.030 0.024  0.016 0.028   0.016    0.010 0.056    0.045  0.009
+#           Madgelaine Diamond Coringa
+                         
+#Diamond         0.008                
+#Coringa         0.003   0.009        
+#Herald          0.002   0.006   0.008
+```
+
+
+##2.7 Visualise Fst
+```{r}
+
+#Visualise pairwise Fst for reefs 
+# Desired order of labels
+
+lab_order = c("Elizabeth", "Middleton", "Wreck", "Kenn", "Mellish", "Marion", "Frederick")
+
+
+# Change order of rows and cols
+fst.mat = as.matrix(pdam_fst)
+fst.mat1 = fst.mat[lab_order, ]
+fst.mat2 = fst.mat1[, lab_order]
+
+# Create a data.frame
+ind = which(upper.tri(fst.mat2), arr.ind = TRUE)
+fst.df = data.frame(Site1 = dimnames(fst.mat2)[[2]][ind[,2]],
+                    Site2 = dimnames(fst.mat2)[[1]][ind[,1]],
+                    Fst = fst.mat2[ ind ])
+
+# Keep the order of the levels in the data.frame for plotting 
+fst.df$Site1 = factor(fst.df$Site1, levels = unique(fst.df$Site1))
+fst.df$Site2 = factor(fst.df$Site2, levels = unique(fst.df$Site2))
+fst.df$Fst[fst.df$Fst < 0] = 0
+fst.df %>% str
+fst.label = expression(italic("F")[ST])
+mid = max(fst.df$Fst) / 2
+
+# Load required package
+library(RColorBrewer)
+
+# Plot heatmap with Spectral palette
+ggplot(data = fst.df, aes(x = Site1, y = Site2, fill = Fst)) +
+  geom_tile(colour = "black") +
+  scale_fill_gradientn(
+    colours = rev(brewer.pal(11, "Spectral")),  # Spectral palette reversed for better heatmap logic
+    limits = c(0, 0.35),
+    breaks = c(0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35),
+    guide = "colorbar",
+    name = fst.label
+  ) +
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0, 0), position = "right") +
+  theme(
+    axis.text = element_text(colour = "black", size = 10, face = "bold"),
+    axis.title = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 0.5),
+    panel.grid = element_blank(),
+    panel.background = element_blank(),
+    legend.position = c(0.15, 0.7),
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 10),
+    legend.direction = "vertical"
+  ) +
+  coord_fixed(ratio = 0.9)
+```
+
+
+
+#3 Lord Howe IBD
+##3.1 Data wrangle
+
+```{r}
+## --- Population-level IBD analysis ---
+
+library(adegenet)
+library(ade4)
+library(MASS)      # for kde2d
+library(scales)    # for alpha transparency
+
+# 1. Convert genind → genpop (collapses individuals by pop)
+genpop_obj <- genind2genpop(pdam_gen)
+
+# 2. Genetic distance (Nei’s distance, method=2)
+Dgen <- dist.genpop(genpop_obj, method = 2)
+
+# 3. Geographic distance
+reef_coords <- read.csv("pdam.coord.csv", row.names = 1)
+
+# 4. Subset reef_coords to match the populations in genpop_obj
+coords_cs <- reef_coords[popNames(genpop_obj), ]
+
+# 5. Check alignment
+all(rownames(coords_cs) == popNames(genpop_obj))
+```
+
+
+```{r}
+
+# Euclidean distance among reefs
+Dgeo <- dist(coords_cs)
+
+# 4. Mantel test
+ibd <- mantel.randtest(Dgen, Dgeo, nrepet = 999)
+plot(ibd)
+
+# 5. Pretty scatter plot with density overlay
+Dgen_vec <- as.vector(Dgen)
+Dgeo_vec <- as.vector(Dgeo)
+
+dens <- kde2d(Dgeo_vec, Dgen_vec, n = 300)
+myPal <- colorRampPalette(c("white","blue","gold","orange","red"))
+
+plot(Dgeo_vec, Dgen_vec, pch = 20, cex = 0.8,
+     xlab = "Geographic distance", ylab = "Genetic distance")
+image(dens, col = alpha(myPal(300), 0.6), add = TRUE)
+abline(lm(Dgen_vec ~ Dgeo_vec), lwd = 2)
+lines(loess.smooth(Dgeo_vec, Dgen_vec), col = "red", lwd = 2)
+```
+**We see stronger trends of IBD in P. damicornis compared to A. humilis due to the brooding nature of this coral and therefore lower gene flow potential between reefs** 
+
+```{r}
+ibd_test <- mantel.randtest(Dgen, Dgeo, nrepet = 999)  # 999 permutations
+
+ibd_test
+
+IBD <- vegan::mantel(Dgen,log(Dgeo), method="pearson")
+IBD
+
+IBD <- vegan::mantel(Dgen,log(Dgeo), method="spearman")
+IBD
+```
+
+#Log geographic distance vs. genetic distance 
+```{r}
+par(mar=c(4,4,0,0))
+dens <- MASS::kde2d(log(Dgeo), Dgen, n=300)
+plot(log(Dgeo), Dgen, pch=20, cex=0.5,  
+    xlab="Log of Geographic Distance", ylab="Genetic Distance")
+image(dens, col=transp(myPal(300), 0.7), add=TRUE)
+abline(lm(Dgen ~ log(Dgeo)))
+lines(loess.smooth(log(Dgeo), Dgen), col="red")
+```
+
+# Section 4. Gene environment analysis
