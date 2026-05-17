@@ -1,0 +1,965 @@
+---
+title: "01_Acropora"
+author: "Magena Marzonie and Monique White"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#Load Packages
+library(dplyr)
+library(vcfR)
+library(adegenet)
+library(data.table)
+```
+
+**This markdown is for cleaning genetic data, importing metadata, merging files, and filtering loci**
+ # Section 1. Data Wrangle
+
+#Load data
+
+```{r}
+vcf <- read.vcfR("CAGRF24080074-2_variants_shortened.vcf")
+
+# Clean sample names
+sample_names <- colnames(vcf@gt)[-1]
+shortened_names <- sub("^([^-]+-[^-]+).*", "\\1", sample_names)
+colnames(vcf@gt)[-1] <- shortened_names
+```
+
+#1. QC Filtering - all samples 
+##1.1 Convert genotypes to numeric format
+
+```{r}
+gt <- extract.gt(vcf, element = "GT", as.numeric = FALSE)
+geno_num <- matrix(NA, nrow = nrow(gt), ncol = ncol(gt))
+
+for (i in 1:nrow(gt)) {
+  for (j in 1:ncol(gt)) {
+    g <- gt[i, j]
+    geno_num[i, j] <- ifelse(g %in% c("0/0", "0|0"), 0,
+                       ifelse(g %in% c("0/1", "1/0", "0|1", "1|0"), 1,
+                       ifelse(g %in% c("1/1", "1|1"), 2, NA)))
+  }
+}
+```
+
+##1.2 Loci filtering
+
+```{r}
+## 1.2 Loci filtering
+
+# Locus missingness
+missing_per_locus <- rowMeans(is.na(geno_num))
+
+# Minor allele count (MAC)
+# Calculate MAF per locus
+maf <- apply(geno_num, 1, function(x) {
+  x <- x[!is.na(x)]
+  p <- mean(x) / 2         # allele frequency of ALT allele
+  min(p, 1 - p)            # minor allele frequency
+})
+
+# Keep loci: missingness ≤ 20%, MAF ≥ 0.05
+keep_loci <- which(missing_per_locus <= 0.2 & maf >= 0.05)
+
+# Apply locus filter
+vcf_filtered <- vcf[keep_loci, ]
+
+# Individual filtering
+gt_filtered <- extract.gt(vcf_filtered, element = "GT", as.numeric = FALSE)
+missing_per_ind <- colMeans(is.na(gt_filtered))
+keep_inds <- names(missing_per_ind[missing_per_ind <= 0.5])
+vcf_filtered <- vcf_filtered[, c(TRUE, colnames(gt_filtered) %in% keep_inds)]
+saveRDS(missing_per_ind, file = "missing_per_ind.RData")
+
+# Remove 2020 individuals
+keep_inds <- colnames(vcf_filtered)[-1]
+vcf_filtered <- vcf_filtered[, c(TRUE, !grepl("-20", keep_inds))]
+```
+
+##1.3 Genind conversion / Joining metadata
+
+```{r}
+acro_gen_full <- vcfR2genind(vcf_filtered)
+
+# Read metadata
+meta <- fread("merged_metadata.csv")
+
+# Check for match
+inds <- indNames(acro_gen_full)
+inds_clean <- trimws(inds)
+meta_clean <- meta %>% mutate(SampleID = trimws(as.character(SampleID)))
+
+write.csv(x = meta_clean, file ="meta_clean.csv")
+
+# Filter out '-20' samples from inds
+inds_filtered <- inds_clean[!grepl("-20|-24b", inds_clean)]
+
+
+# Filter metadata to match and remove '-20' individuals
+meta_ordered <- meta_clean %>%
+  filter(SampleID %in% inds_filtered) %>%
+  arrange(match(SampleID, inds_filtered))
+write.csv(meta_ordered, file = "meta_ordered.csv")
+
+# Also update genind object to remove those individuals
+acro_gen_full <- acro_gen_full[!grepl("-20", indNames(acro_gen_full)), ]
+```
+
+Step 6: Read and merge metadata
+
+```{r}
+library(data.table)
+# Read metadata file and adjust SampleID column for merging
+acro_meta <- read.csv("Acro_Meta2024.csv") %>%
+  rename(SampleID = VialID)
+
+# Match and merge metadata
+inds <- indNames(acro_gen_full)
+meta_trimmed <- merge(data.table(SampleID = inds), acro_meta, by = "SampleID", all.x = TRUE)
+meta_trimmed <- meta_trimmed[match(inds, meta_trimmed$SampleID), ]
+
+write.csv(x = meta_trimmed, file = "meta_trimmed.csv")
+
+# Add population info (STRATA) to genind
+acro_gen_full@pop <- as.factor(meta_trimmed$STRATA)
+
+# Optionally, read and reassign population map if needed
+pop_map <- read.table("strata.tsv", header=TRUE, stringsAsFactors = TRUE)
+acro_gen_full@pop <- pop_map$STRATA
+```
+
+```{r}
+pop_vector <- meta_trimmed$Reef  
+pop(acro_gen_full) <- as.factor(pop_vector)
+
+acro_gen_full <- acro_gen_full[pop(acro_gen_full) != "GBR", ]
+
+```
+
+```{r}
+save(acro_gen_full, file = "acro_gen_full.RData")
+
+load("acro_gen_full.RData")
+```
+
+```{r}
+coords <- meta_trimmed[match(indNames(acro_gen_full), meta_trimmed$SampleID), c("GPS.S", "GPS.E")]
+```
+
+```{r}
+write.table(coords,
+            file = "coords.txt",
+            sep = "\t",
+            quote = FALSE,
+            row.names = TRUE,
+            col.names = FALSE)
+```
+
+
+
+```{r}
+# Read raw lines
+lines <- readLines("geno_matrix.txt")
+length(lines)      # number of rows
+
+# Check the number of columns per line
+col_counts <- sapply(lines, function(x) length(strsplit(x, "\\s+")[[1]]))
+table(col_counts)  # see the distribution of column counts
+```
+
+# Section 2. PCA
+```{r}
+library(dplyr)
+library(vcfR)
+library(adegenet)
+library(data.table)
+library(readr)
+read.csv("meta_clean.csv")
+```
+
+##1.4 PCA of genetic variance
+```{r}
+load("acro_gen_full.Rdata")
+
+x <- tab(acro_gen_full, NA.method = "mean")
+pca1 <- dudi.pca(x, scannf = FALSE, scale = FALSE, nf = 3)
+
+percent <- pca1$eig / sum(pca1$eig) * 100
+barplot(percent, ylab = "Variance explained (%)", names.arg = round(percent, 1))
+```
+##1.5 Prepare PCA coordinates + add population info
+```{r}
+# Extract PCA coordinates
+ind_coords <- as.data.frame(pca1$li)
+# Add individual names
+ind_coords$ind <- rownames(ind_coords)
+ind_coords <- ind_coords %>% rename(SampleID = ind)
+meta_clean <- read.csv("meta_clean.csv")
+
+ind_coords <- ind_coords %>% left_join(meta_clean, by = "SampleID")
+
+save(ind_coords, file = "ind_coords.RData")
+```
+
+##1.6 Plot PCA by reef
+```{r}
+library(ggplot2)
+
+reef_order <- c(
+  "Willis", "Madgelaine", "Herald", "Diamond", "Coringa",
+  "Marion", "Mellish", "Frederick", "Saumarez", "Kenn",
+  "Wreck", "Cato", "GBR", "Elizabeth", "Middleton"
+)
+
+ind_coords$Reef <- factor(ind_coords$Reef, levels = reef_order)
+
+ggplot(ind_coords, aes(x = Axis1, y = Axis2, color = Reef)) +
+  geom_point(size = 3, alpha = 0.9) +
+  labs(
+    x = paste0("PC1 (", round(pca1$eig[1] / sum(pca1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca1$eig[2] / sum(pca1$eig) * 100, 1), "%)"),
+    color = "Population"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(panel.grid = element_blank())
+
+```
+##1.7 Plot PCA by latitude
+```{r}
+library(wesanderson)
+library(ggplot2)
+library(wesanderson)
+
+# Pick your fave Wes Anderson palette (e.g., "Darjeeling1", "Zissou1", "Moonrise1", etc.)
+palette <- wes_palette("Zissou1", n = 100, type = "continuous")
+
+ggplot(ind_coords, aes(x = Axis1, y = Axis2, color = GPS.S)) +
+  geom_point(size = 3, alpha = 0.9) +
+  scale_color_gradientn(colors = palette) +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca1$eig[1] / sum(pca1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca1$eig[2] / sum(pca1$eig) * 100, 1), "%)"),
+    color = "Latitude"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.5)
+  )
+
+```
+
+##1.8 Plot PCA by longitude
+```{r}
+library(wesanderson)
+library(ggplot2)
+library(wesanderson)
+
+# Pick your fave Wes Anderson palette (e.g., "Darjeeling1", "Zissou1", "Moonrise1", etc.)
+palette <- wes_palette("Cavalcanti1", n = 100, type = "continuous")
+
+ggplot(ind_coords, aes(x = Axis1, y = Axis2, color = GPS.E)) +
+  geom_point(size = 3, alpha = 0.9) +
+  scale_color_gradientn(colors = palette) +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca1$eig[1] / sum(pca1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca1$eig[2] / sum(pca1$eig) * 100, 1), "%)"),
+    color = "Longitude"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.5)
+  )
+
+```
+##1.9 Plot PCA by depth
+```{r}
+library(wesanderson)
+library(ggplot2)
+library(wesanderson)
+
+# Pick your fave Wes Anderson palette (e.g., "Darjeeling1", "Zissou1", "Moonrise1", etc.)
+palette <- wes_palette("GrandBudapest1", n = 100, type = "continuous")
+
+ggplot(ind_coords, aes(x = Axis1, y = Axis2, color = Depth..m.)) +
+  geom_point(size = 3, alpha = 0.9) +
+  scale_color_gradientn(colors = palette) +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca1$eig[1] / sum(pca1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca1$eig[2] / sum(pca1$eig) * 100, 1), "%)"),
+    color = "Depth (m)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.5)
+  )
+```
+
+# PCA with WGS samples highlighted
+
+```{r}
+wgs_samples <- c(
+"A025-24", "A035-24", "A235-24","A052-24", "A196-24", "A066-24", "A214-24", "A334-24", "A342-24", "A353-24", "A100-24", "A115-24", "A277-24", "A290-24",
+"I015-24", "I034-24", "I066-24", "I205-24", "I209-24", "I113-24", "I095-24", "I171-24", "I214-24", "I053-24", "I108-24", "I126-24",
+"M124-24", "M132-24", "M229-24", "M047-24", "M228-24", "M128-24", "M027-24", "M069-24", "M102-24", "M107-24", "M111-24", "M224-24", "M186-24","M247-24", "M263-24",
+"PD046-24", "PD036-24", "PD141-24", "PV119-24", "PV167-24","PV286-24", "PV314-24", "PM124-24", "PM384-24", "PM471-24"
+)
+
+library(dplyr)
+
+ind_coords <- ind_coords %>%
+  mutate(WGS = if_else(SampleID %in% wgs_samples, "yes", "no")) %>% 
+  mutate(WGS = as.factor(WGS))
+```
+
+```{r}
+ggplot(ind_coords, aes(x = Axis1, y = Axis2)) +
+  geom_point(
+    data = subset(ind_coords, WGS == "no"),
+    aes(color = WGS),
+    size = 3, alpha = 0.9
+  ) +
+  geom_point(
+    data = subset(ind_coords, WGS == "yes"),
+    aes(color = WGS),
+    size = 3, alpha = 0.9
+  ) +
+  scale_color_manual(
+    values = c("no" = "grey70", "yes" = "#D7191C")
+  ) +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca1$eig[1] / sum(pca1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca1$eig[2] / sum(pca1$eig) * 100, 1), "%)"),
+    color = "WGS"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.5)
+  )
+```
+```{r}
+# Custom hex colors for the first 12 reefs
+my_colors <- c(
+  "#d85874", "#ce4f35", "#c78048", "#6db543", "#3e8048",
+  "#63be84", "#43bdc4", "#6486c9", "#7862cc", "#cb87c9",
+  "#c34cae", "#9e496b"
+)
+
+# Reef order (14 reefs total)
+reef_order <- c("Willis", "Madgelaine", "Herald", "Diamond", "Coringa",
+                "Marion", "Mellish", "Frederick", "Saumarez", "Kenn",
+                "Wreck", "Cato", "Elizabeth", "Middleton")
+
+# Assign the custom colors to the first 12 reefs
+custom_palette <- setNames(my_colors, reef_order[1:12])
+
+# Assign custom colors to Elizabeth and Middleton
+custom_palette["Elizabeth"] <- "#c4af46"
+custom_palette["Middleton"] <- "#7a7932"
+
+# Final named palette
+reef_palette <- custom_palette
+
+# View or use reef_palette
+reef_palette
+```
+
+##1.9 Plot PCA by Reef
+```{r}
+
+ggplot(ind_coords, aes(x = Axis1, y = Axis2, color = Reef)) +
+  geom_point(size = 3, alpha = 0.9) +
+  scale_color_manual(values = reef_palette) +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca1$eig[1] / sum(pca1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca1$eig[2] / sum(pca1$eig) * 100, 1), "%)")
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.5)
+  )
+
+save(ind_coords, file = "ind_coords.RData")
+```
+
+```{r}
+ind_coords_acro <- ind_coords %>%
+  mutate(HostCluster = case_when(
+    Axis1 < -60 ~ "AC1",
+    Axis1 > -60 & Axis1 < -10 ~ "AC1b",
+    Axis1 > -10 ~ "AC2",
+    # Axis1 > -10 & Axis2 > 0 ~ "AC2",
+    # Axis1 > 0 & Axis2 < 0 & Axis2 > -10 ~ "AC2b",
+    # Axis1 > 0 & Axis2 < -10 ~ "AC3",
+    TRUE ~ NA_character_  # anything that doesn't match the above
+  ))
+
+# ind_coords_acro <- ind_coords %>%
+#   mutate(HostCluster = if_else(Axis1 < -80 & Axis2 > -3, "LHCluster", "CSCluster"))
+
+
+save(ind_coords_acro, file = "ind_coords_acro.RData")
+```
+
+
+```{r}
+ind_coords_acro %>%
+  group_by(HostCluster) %>%
+  summarise(n = n())
+```
+
+```{r}
+pca.host.pop <- ggplot(ind_coords_acro, aes(x = Axis1, y = Axis2, fill = Reef)) +
+  geom_point(size = 3, alpha = 0.9, color = "black") +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca1$eig[1] / sum(pca1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca1$eig[2] / sum(pca1$eig) * 100, 1), "%)")
+  ) +
+  scale_fill_manual(values = reef_palette) +
+  theme_minimal()
+
+pca.host.pop
+```
+
+Creating a cluster based PCA
+```{r}
+library(wesanderson)
+library(ggplot2)
+library(wesanderson)
+# palette <- wes_palette("GrandBudapest1", n = 6, type = "discrete")
+pca.host.pop.clusters <- ggplot(ind_coords_acro, aes(x = Axis1, y = Axis2, colour = HostCluster)) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca1$eig[1] / sum(pca1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca1$eig[2] / sum(pca1$eig) * 100, 1), "%)")
+  ) +
+  # scale_fill_manual(values = palette) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.5)
+  )
+
+pca.host.pop.clusters
+```
+
+```{r}
+ggsave(pca.host.pop.clusters, file = "acropora.pca.clusters.PDF",
+       unit = "mm",
+       height = 189,
+       width = 189)
+ggsave(pca.host.pop.clusters, file = "acropora.pca.clusters.PNG",
+       unit = "mm",
+       height = 189,
+       width = 189)
+```
+
+
+```{r}
+ind_coords_acro <- ind_coords_acro %>% filter(Reef != "NA")
+ind_coords_acro <- ind_coords_acro %>% filter(Reef != "GBR")
+
+
+
+pca.host.pop <- ggplot(ind_coords_acro, aes(x = Axis1, y = Axis2, fill = Reef, shape = HostCluster)) +
+  geom_point(size = 3, alpha = 0.9, color = "black") +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca1$eig[1] / sum(pca1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca1$eig[2] / sum(pca1$eig) * 100, 1), "%)")
+  ) +
+  scale_fill_manual(values = reef_palette) +
+    scale_shape_manual(values = c(21, 22, 23, 24, 25)) +
+  guides(
+    fill = guide_legend(override.aes = list(shape = 21, color = "black")),
+    shape = guide_legend(override.aes = list(fill = "grey70"))  # optional shape legend tweak
+  ) +
+  theme_minimal()
+
+pca.host.pop
+```
+
+```{r}
+library(plotly)
+
+# add tooltip aesthetics
+pca.symbiont <- ggplot(ind_coords_acro, 
+                       aes(x = Axis1, y = Axis2, 
+                           fill = Reef, 
+                           shape = HostCluster,
+                           text = paste0(
+                             "Sample: ", SampleID, "<br>",
+                             "Population: ", Reef, "<br>",
+                             "Host Cluster: ", HostCluster
+                           ))) +
+  geom_point(size = 3, alpha = 0.9, color = "black") +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca1$eig[1] / sum(pca1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca1$eig[2] / sum(pca1$eig) * 100, 1), "%)")
+  ) +
+  scale_fill_manual(values = reef_palette) +
+  scale_shape_manual(values = c(21, 22, 23, 24, 25)) +
+  guides(
+    fill = guide_legend(override.aes = list(shape = 21, color = "black")),
+    shape = guide_legend(override.aes = list(fill = "grey70"))
+  ) +
+  theme_minimal()
+
+# make interactive with custom tooltip
+pca.symbiont.interactive <- ggplotly(pca.symbiont, tooltip = "text")
+
+pca.symbiont.interactive
+```
+
+
+
+#2. Separating datasets
+
+##2.1 Create dataset for LH and CS
+```{r}
+load("acro_gen_full.RData")
+load("ind_coords.RData")
+
+# ind_coords_acro <- ind_coords %>%
+#   mutate(AcroID = if_else(Axis1 < -80 & Axis2 > -3, "LHCluster", "CSCluster"))
+ind_coords_acro <- ind_coords %>%
+  mutate(HostCluster = case_when(
+    Axis1 < -60 ~ "AC1",
+    Axis1 > -60 & Axis1 < -10 ~ "AC1b",
+    Axis1 > -10 ~ "AC2",
+    # Axis1 > -10 & Axis2 > 0 ~ "AC2",
+    # Axis1 > 0 & Axis2 < 0 & Axis2 > -10 ~ "AC2b",
+    # Axis1 > 0 & Axis2 < -10 ~ "AC3",
+    TRUE ~ NA_character_  # anything that doesn't match the above
+  ))
+
+# Create vectors of SampleIDs for each species based on AcroID
+inds_AC1 <- ind_coords_acro$SampleID[ind_coords_acro$HostCluster == "AC1"]
+inds_AC2 <- ind_coords_acro$SampleID[ind_coords_acro$HostCluster == "AC2"]
+
+# Subset the genind object for each species
+acro_gen_cl1 <- acro_gen_full[inds_AC1, ]
+acro_gen_cl2 <- acro_gen_full[inds_AC2, ]
+
+save(acro_gen_cl1, file = "acro_gen_cl1.RData")
+save(acro_gen_cl2, file = "acro_gen_cl2.RData")
+
+```
+
+##2.2 Run PCA for LH and CS 
+```{r}
+# PCA for Lord Howe
+x_cl1 <- tab(acro_gen_cl1 , NA.method = "mean") #issue that PCA requires non-zero variance, and suggests that loci are monomorphic.
+
+#for PCA to work the var cannot be 0
+var_cols <- apply(x_cl1, 2, var, na.rm = TRUE)
+sum(var_cols == 0, na.rm=TRUE)  # monomorphic loci
+# would be removing 10,234 loci 
+
+# remove loci with zero variance (to get PCA to work)
+x_cl1 <- x_cl1[, !is.na(var_cols) & var_cols > 0]
+
+pca_cl1 <- dudi.pca(x_cl1, scannf = FALSE, scale = FALSE, nf = 3)
+# # check for remaining NA 
+# sum(is.na(x_cl1))
+
+# PCA for Coral Sea 
+x_cl2 <- tab(acro_gen_cl2, NA.method = "mean")
+pca_cl2 <- dudi.pca(x_cl2, scannf = FALSE, scale = FALSE, nf = 3)
+
+```
+
+##2.3 Merge coords and meta
+```{r}
+#load meta ordered
+meta_ordered <- read.csv("meta_ordered.csv")
+# For Lord Howe 
+ind_coords_cl1 <- as.data.frame(pca_cl1$li)
+ind_coords_cl1$SampleID <- rownames(ind_coords_cl1)
+ind_coords_cl1 <- left_join(ind_coords_cl1, meta_ordered, by = "SampleID")
+save(ind_coords_cl1, file = "ind_coords_cl1.RData")
+# For Coral Sea 
+ind_coords_cl2 <- as.data.frame(pca_cl2$li)
+ind_coords_cl2$SampleID <- rownames(ind_coords_cl2)
+ind_coords_cl2 <- left_join(ind_coords_cl2, meta_ordered, by = "SampleID")
+save(ind_coords_cl2, file = "ind_coords_cl2.RData")
+```
+
+
+```{r}
+# Custom hex colors for the first 12 reefs
+my_colors <- c(
+  "#d85874", "#ce4f35", "#c78048", "#6db543", "#3e8048",
+  "#63be84", "#43bdc4", "#6486c9", "#7862cc", "#cb87c9",
+  "#c34cae", "#9e496b"
+)
+
+# Reef order (14 reefs total)
+reef_order <- c("Willis", "Madgelaine", "Herald", "Diamond", "Coringa",
+                "Marion", "Mellish", "Frederick", "Saumarez", "Kenn",
+                "Wreck", "Cato", "Elizabeth", "Middleton")
+
+# Assign the custom colors to the first 12 reefs
+custom_palette <- setNames(my_colors, reef_order[1:12])
+
+# Assign custom colors to Elizabeth and Middleton
+custom_palette["Elizabeth"] <- "#c4af46"
+custom_palette["Middleton"] <- "#7a7932"
+
+# Final named palette
+reef_palette <- custom_palette
+
+# View or use reef_palette
+reef_palette
+```
+
+##2.4 Lord Howe PCA - reef
+```{r}
+library(tidyverse)
+reef_order <- c("Willis", "Madgelaine", "Herald", "Diamond", "Coringa",
+  "Marion", "Mellish", "Frederick", "Saumarez", "Kenn",
+  "Wreck", "Cato", "GBR", "Elizabeth", "Middleton")
+
+ind_coords_cl1$Reef <- factor(ind_coords_cl1$Reef, levels = reef_order)
+
+ind_coords_cl1 <- ind_coords_cl1 %>% filter(Reef != "NA") %>% filter(Reef != "GBR") %>% filter(Reef != "Frederick") %>% filter(Reef != "Wreck")
+
+pca_cl1 <- ggplot(ind_coords_cl1, aes(x = Axis1, y = Axis2, color = Reef)) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca_cl1$eig[1] / sum(pca_cl1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca_cl1$eig[2] / sum(pca_cl1$eig) * 100, 1), "%)"),
+    color = "Reef"
+  ) +
+  scale_color_manual(values = reef_palette) +   
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.5)
+  )
+
+pca_cl1
+```
+
+
+##2.6 Coral Sea PCA - reef
+```{r}
+reef_order <- c("Willis", "Madgelaine", "Herald", "Diamond", "Coringa",
+  "Marion", "Mellish", "Frederick", "Saumarez", "Kenn",
+  "Wreck", "Cato", "GBR", "Elizabeth", "Middleton")
+
+ind_coords_cl2$Reef <- factor(ind_coords_cl2$Reef, levels = reef_order)
+
+ind_coords_cl2 <- ind_coords_cl2 %>% filter(Reef != "NA")
+
+pca_cl2 <- ggplot(ind_coords_cl2, aes(x = Axis1, y = Axis2, color = Reef)) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca_cl2$eig[1] / sum(pca_cl2$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca_cl2$eig[2] / sum(pca_cl2$eig) * 100, 1), "%)"),
+    color = "Reef"
+  ) +
+  scale_color_manual(values = reef_palette) + 
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.5)
+  )
+
+pca_cl2
+```
+
+
+```{r}
+# Add missingness to the PCA dataframe
+missing_per_ind <- readRDS("missing_per_ind.RData")
+ind_coords_cl2$Missingness <- missing_per_ind[ind_coords_cl2$SampleID]
+```
+
+
+```{r}
+pca_missing <- ggplot(ind_coords_cl2, aes(x = Axis1, y = Axis2, color = Missingness)) +
+  geom_point(size = 3, alpha = 0.9) +
+  scale_color_viridis_c(option = "plasma", end = 0.9, na.value = "grey80") +
+  geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
+  labs(
+    x = paste0("PC1 (", round(pca1$eig[1] / sum(pca1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca1$eig[2] / sum(pca1$eig) * 100, 1), "%)"),
+    color = "% Missing Data"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.5)
+  )
+
+pca_missing
+
+```
+
+# Section 3. Genetic Diversity Stats
+
+```{r}
+# packages you'll need
+library(tidyverse)
+library(vroom)      # fast reading
+library(vcfR)       # if working with VCF directly
+library(adegenet)   # PCA on genotypes (if using genind)
+library(lfmm)       # or lfmm2 (install from CRAN/Bioconductor)
+library(vegan)      # RDA / partial RDA
+library(car)        # vif
+library(qqman)      # manhattan
+library(hierfstat)
+#MW: loaded as part of tidyverse; library(dplyr)
+# MW this probably should be loaded at the top if we want all used packages to be loaded here. library(RColorBrewer)
+library(ade4)
+library(MASS)      # for kde2d
+library(scales) 
+```
+
+```{r}
+# Load genind data
+```{r}
+load("acro_gen_full.RData")
+load("acro_gen_cl1.RData")
+load("acro_gen_cl2.RData")
+load("ind_coords_acro.RData")
+load("ind_coords_cl2.RData")
+load("ind_coords_cl1.RData")
+
+acro_gen_cl1
+acro_gen_cl2
+```
+
+### 1. Full data
+```{r}
+# Let's say you have a vector of populations for each individual
+meta_trimmed <- read.csv("meta_trimmed.csv")
+meta_trimmed <- meta_trimmed %>% 
+  mutate(MarinePark = case_when(
+    Reef %in% c("Elizabeth", "Middleton") ~ "LH",
+    !Reef %in% c("Elizabeth", "Middleton") ~ "CS"
+  ))
+
+ind_coords_acro <- ind_coords_acro %>% 
+  mutate(MarinePark = case_when(
+    Reef %in% c("Elizabeth", "Middleton") ~ "LH",
+    !Reef %in% c("Elizabeth", "Middleton") ~ "CS"
+  ))
+
+#AC1
+ind_coords_cl1 <- ind_coords_cl1 %>% 
+  mutate(MarinePark = case_when(
+    Reef %in% c("Elizabeth", "Middleton") ~ "LH",
+    !Reef %in% c("Elizabeth", "Middleton") ~ "CS"
+  ))
+acro_gen_cl1 <- acro_gen_cl1[!indNames(acro_gen_cl1) %in% "A249-24b"] #remove extra individual from GenID
+pop_vector_cl1 <- ind_coords_cl1$MarinePark # or however you're storing population info
+pop(acro_gen_cl1) <- as.factor(pop_vector_cl1)
+
+#AC2
+ind_coords_cl2 <- ind_coords_cl2 %>% 
+  mutate(MarinePark = case_when(
+    Reef %in% c("Elizabeth", "Middleton") ~ "LH",
+    !Reef %in% c("Elizabeth", "Middleton") ~ "CS"
+  ))
+acro_gen_cl2 <- acro_gen_cl2[
+  !indNames(acro_gen_cl2) %in% c("A131-24b", "A294-24b")
+] #remove the samples with b
+pop_vector_cl2 <- ind_coords_cl2$MarinePark # or however you're storing population info
+pop(acro_gen_cl2) <- as.factor(pop_vector_cl2)
+```
+
+## 1.1 Heterozygosity (Ho)
+```{r}
+pop_vector <- ind_coords_acro$HostCluster # or however you're storing population info
+pop(acro_gen_full) <- as.factor(pop_vector)
+# acro_gen_full <- acro_gen_full[pop(acro_gen_full) != "GBR", ]
+# pop_vector <- ind_coords_acro$HostCluster # or however you're storing population info
+# pop(acro_gen_full) <- as.factor(pop_vector)
+
+#Here we are calculating basic stats using hierfstat
+basic_acro <- basic.stats(acro_gen_full, diploid = TRUE)
+
+# Mean observed heterozygosity per site
+Ho_acro = apply(basic_acro$Ho, MARGIN = 2, FUN = mean, na.rm = TRUE) %>%
+  round(digits = 3)
+Ho_acro
+```
+
+## 1.2 Heterozygosity (He)
+```{r}
+# Mean expected heterozygosity per site
+He_acro = apply(basic_acro$Hs, MARGIN = 2, FUN = mean, na.rm = TRUE) %>%
+  round(digits = 3)
+He_acro
+```
+
+#Mean Ho and He across populations
+```{r}
+# Mean Ho and He per population
+mean_Ho <- apply(basic_acro$Ho, 2, mean, na.rm = TRUE)
+mean_He <- apply(basic_acro$Hs, 2, mean, na.rm = TRUE)
+
+round(cbind(mean_Ho, mean_He), 3)
+```
+
+
+##1.3 Inbreeding 
+```{r}
+apply(basic_acro$Fis, MARGIN = 2, FUN = mean, na.rm = TRUE) %>%
+  round(digits = 3)
+```
+
+# AC1
+## 1.1 Heterozygosity (Ho)
+```{r}
+#Here we are calculating basic stats using hierfstat
+basic_acro <- basic.stats(acro_gen_cl1, diploid = TRUE)
+
+# Mean observed heterozygosity per site
+Ho_acro = apply(basic_acro$Ho, MARGIN = 2, FUN = mean, na.rm = TRUE) %>%
+  round(digits = 3)
+Ho_acro
+```
+
+## 1.2 Heterozygosity (He)
+```{r}
+# Mean expected heterozygosity per site
+He_acro = apply(basic_acro$Hs, MARGIN = 2, FUN = mean, na.rm = TRUE) %>%
+  round(digits = 3)
+He_acro
+```
+
+#Mean Ho and He across populations
+```{r}
+# Mean Ho and He per population
+mean_Ho <- apply(basic_acro$Ho, 2, mean, na.rm = TRUE)
+mean_He <- apply(basic_acro$Hs, 2, mean, na.rm = TRUE)
+
+round(cbind(mean_Ho, mean_He), 3)
+```
+
+
+##1.3 Inbreeding 
+```{r}
+apply(basic_acro$Fis, MARGIN = 2, FUN = mean, na.rm = TRUE) %>%
+  round(digits = 3)
+```
+
+```{r}
+library(ggplot2)
+library(tidyr)
+
+fis_df <- as.data.frame(basic_acro$Fis)
+fis_long <- pivot_longer(fis_df, cols = everything(), names_to = "Population", values_to = "Fis")
+
+ggplot(fis_long, aes(x = Fis)) +
+  geom_histogram(bins = 50, fill = "skyblue", color = "black") +
+  facet_wrap(~ Population, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "Distribution of per-locus FIS per population")
+```
+
+
+##2.6 Calculate Fst
+```{r}
+#using hierfstat package here. 
+#compute pairwise Fst values. Returns pairwise distances following Weir & Cockerham 1984 
+acro_fst_cl1 <-  genet.dist(acro_gen_cl1, method = "WC84") %>% round(digits = 3)
+acro_fst_cl1
+
+save(acro_fst_cl1, file = "acro_fst_cl2.RData")
+```
+
+
+#AC2
+## 1.1 Heterozygosity (Ho)
+```{r}
+#Here we are calculating basic stats using hierfstat
+basic_acro <- basic.stats(acro_gen_cl2, diploid = TRUE)
+
+# Mean observed heterozygosity per site
+Ho_acro = apply(basic_acro$Ho, MARGIN = 2, FUN = mean, na.rm = TRUE) %>%
+  round(digits = 3)
+Ho_acro
+```
+
+## 1.2 Heterozygosity (He)
+```{r}
+# Mean expected heterozygosity per site
+He_acro = apply(basic_acro$Hs, MARGIN = 2, FUN = mean, na.rm = TRUE) %>%
+  round(digits = 3)
+He_acro
+```
+
+#Mean Ho and He across populations
+```{r}
+# Mean Ho and He per population
+mean_Ho <- apply(basic_acro$Ho, 2, mean, na.rm = TRUE)
+mean_He <- apply(basic_acro$Hs, 2, mean, na.rm = TRUE)
+
+round(cbind(mean_Ho, mean_He), 3)
+```
+
+
+##1.3 Inbreeding 
+```{r}
+apply(basic_acro$Fis, MARGIN = 2, FUN = mean, na.rm = TRUE) %>%
+  round(digits = 3)
+```
+##2.6 Calculate Fst
+```{r}
+#using hierfstat package here. 
+#compute pairwise Fst values. Returns pairwise distances following Weir & Cockerham 1984 
+acro_fst_cl2 <-  genet.dist(acro_gen_cl2, method = "WC84") %>% round(digits = 3)
+acro_fst_cl2
+
+save(acro_fst_cl2, file = "acro_fst_cl2.RData")
+```
+
+
+```{r}
+library(ggplot2)
+library(tidyr)
+
+fis_df <- as.data.frame(basic_acro$Fis)
+fis_long <- pivot_longer(fis_df, cols = everything(), names_to = "Population", values_to = "Fis")
+
+ggplot(fis_long, aes(x = Fis)) +
+  geom_histogram(bins = 50, fill = "skyblue", color = "black") +
+  facet_wrap(~ Population, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "Distribution of per-locus FIS per population")
+```
+
