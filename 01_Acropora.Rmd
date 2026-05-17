@@ -1016,22 +1016,22 @@ prep_genotype <- function(genind_obj) {
 Environmental data here was extracted in the RMarkdown called 06_Environmental_Data_extractions by Monique. It was extracted from NOAA DHW dataset, using the EDRAP package.
 
 ```{r}
-## 1.2 Load environmental data
-# enviro <- read.csv("reef_summary.csv") %>%
-#   rename(Reef = POI_ID) %>%
-#   mutate(Reef = as.factor(Reef)) %>%
-#   select(Reef, year, month, week,
-#          week_mean_DHW, week_max_DHW, week_sd_DHW,
-#          week_mean_SST, week_max_SST, week_sd_SST,
-#          month_mean_DHW, month_max_DHW, month_sd_DHW,
-#          month_mean_SST, month_max_SST, month_sd_SST,
-#          annual_mean_DHW, annual_max_DHW, annual_sd_DHW,
-#          annual_mean_SST, annual_max_SST, annual_sd_SST,
-#          decade_mean_DHW, decade_max_DHW, decade_sd_DHW,
-#          decade_mean_SST, decade_max_SST, decade_sd_SST,
-#          )
-# enviro_long <- enviro %>% 
-#   pivot_longer(cols = 5:28, names_to = "Variable", values_to = "Value")
+# 1.2 Load environmental data
+enviro <- read.csv("reef_summary.csv") %>%
+  rename(Reef = POI_ID) %>%
+  mutate(Reef = as.factor(Reef)) %>%
+  select(Reef, year, month, week,
+         week_mean_DHW, week_max_DHW, week_sd_DHW,
+         week_mean_SST, week_max_SST, week_sd_SST,
+         month_mean_DHW, month_max_DHW, month_sd_DHW,
+         month_mean_SST, month_max_SST, month_sd_SST,
+         annual_mean_DHW, annual_max_DHW, annual_sd_DHW,
+         annual_mean_SST, annual_max_SST, annual_sd_SST,
+         decade_mean_DHW, decade_max_DHW, decade_sd_DHW,
+         decade_mean_SST, decade_max_SST, decade_sd_SST,
+         )
+enviro_long <- enviro %>%
+  pivot_longer(cols = 5:28, names_to = "Variable", values_to = "Value")
 
 enviro <- read.csv("enviro.csv") %>% 
   rename(Reef = POI_ID)
