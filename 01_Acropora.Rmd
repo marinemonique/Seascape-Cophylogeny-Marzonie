@@ -967,7 +967,7 @@ ggplot(fis_long, aes(x = Fis)) +
 # Section 4. Gene Environment Analysis
 **Here we are running GEAs for (1) the full dataset, (2) Acro Cluster 1 only and (3) Acro Cluster 2 only**
 
-#Load libraries
+## Load libraries
 ```{r}
 if (!requireNamespace("BiocManager", quietly = TRUE))
     install.packages("BiocManager")
@@ -988,9 +988,9 @@ library(vegan)
 library(corrplot)
 ```
 
-#1. Load data
+##1. Load data
 
-#1.1 Load genotype data
+##1.1 Load genotype data
 ```{r}
 ## 1.1 Load genotype data
 load("acro_gen_full.RData")
@@ -1106,9 +1106,9 @@ build_gen_meta <- function(genind_obj, meta) {
 }
 ```
 
-#4. Build each dataset
+## Build each dataset
 
-##4.1 Full dataset
+##2.1 Full dataset
 
 
 ```{r}
@@ -1124,7 +1124,7 @@ dim(gen_all)
 ```
 
 
-##4.2 Host cluster AC1
+##2.2 Host cluster AC1
 ```{r}
 AC1_data <- build_gen_meta(
   genind_obj = acro_gen_full,
@@ -1137,7 +1137,7 @@ meta_AC1 <- AC1_data$meta
 dim(gen_AC1)
 ```
 
-##4.3 Host cluster AC2
+##2.3 Host cluster AC2
 ```{r}
 AC2_data <- build_gen_meta(
   genind_obj = acro_gen_full,
@@ -1151,7 +1151,7 @@ dim(gen_AC2)
 
 ```
 
-#5. Sanity check for all genetic matrices
+##3. Sanity check for all genetic matrices
 ```{r}
 summary(apply(gen_all, 2, var))
 summary(apply(gen_AC1, 2, var))
