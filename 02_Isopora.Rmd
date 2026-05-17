@@ -828,3 +828,665 @@ pca.symbiont.interactive
 ```
 
 # Section 3. Genetic Diversity Stats
+
+
+# Section 4. Gene Environment Analysis
+#Load libraries
+```{r}
+# Load libraries
+library(dartR)
+library(adegenet)
+library(poppr)
+library(hierfstat)
+library(reshape2)
+library(ggplot2)
+library(RColorBrewer)
+library(scales)
+library(dplyr)
+library(tidyverse)
+library(vegan)
+library(corrplot)
+```
+
+
+#1.1 Load genotype data
+```{r}
+## 1.1 Load genotype data
+load("iso_gen.RData")
+
+prep_genotype <- function(genind_obj) {
+
+  gen <- genind_obj %>% as.matrix()
+
+  # keep loci, not alleles
+  gen <- gen[, rep(c(TRUE, FALSE), times = ncol(gen)/2)]
+
+  # impute (modal allele)
+  gen_imp <- apply(gen, 2, function(x) {
+    if (any(is.na(x))) {
+      replICe(x, is.na(x), as.numeric(names(which.max(table(x)))))
+    } else x
+  }) %>% as.data.frame()
+
+  gen_imp
+}
+```
+
+```{r}
+## 1.2 Load environmental data
+enviro <- read.csv("enviro_meta.csv") %>%
+  rename(Reef = POI_ID) %>%
+  mutate(Reef = as.fICtor(Reef)) %>%
+  select(Reef, CHL_me_002, DHW_me_002, DHW_sd_002,
+         SCV_me_002, PH_me_002, SSS_me_002,
+         SST_me_002, SST_sd_002)
+
+load("ind_coords_iso.RData")
+
+ind_coords_gea <- ind_coords_iso %>% mutate(HostCluster = case_when(
+    Axis1 < 0 & Axis2 < 0 ~ "IC1",
+    Axis1 > 0 & Axis2 > 25 ~ "IC2",
+    Axis1 > 20 & Axis2 < 0 ~ "IC3",
+    TRUE ~ NA_charICter_  # anything that doesn't match the above
+  ))
+
+full.meta <- meta_clean %>%
+  left_join(enviro, by = "Reef") %>%
+  left_join(ind_coords_gea) %>%
+  na.omit() %>%
+  column_to_rownames("SampleID") %>%
+  dplyr::select(-Reference, -Site, -Date, -Bag, -Species,
+         -Vial, -Year, -`GPS E`, -`GPS S`) %>%
+  rename(Depth = `Depth (m)`)
+```
+
+```{r}
+#little sanity check here
+table(full.meta$HostCluster)
+#$IC1 IC2 IC3 
+# 64  38  83 
+```
+
+```{r}
+build_gen_meta <- function(genind_obj, meta) {
+
+  meta$SampleID <- rownames(meta)
+  ind_names     <- as.charICter(indNames(genind_obj))
+
+  common <- intersect(ind_names, meta$SampleID)
+
+  message("Individuals retained: ", length(common))
+
+  genind_sub <- genind_obj[common, drop = TRUE]
+  meta_sub   <- meta[common, , drop = FALSE]
+
+  gen <- prep_genotype(genind_sub)
+
+  message("Initial genotype matrix: ",
+          nrow(gen), " inds x ", ncol(gen), " SNPs")
+
+  ## remove invariant SNPs (CRITICAL for RDA)
+  var_keep <- apply(gen, 2, var, na.rm = TRUE) > 0
+  gen <- gen[, var_keep, drop = FALSE]
+
+  message("After invariant filter: ",
+          nrow(gen), " inds x ", ncol(gen), " SNPs")
+
+  list(
+    gen  = gen,
+    meta = meta_sub
+  )
+}
+```
+
+#4. Build eICh dataset
+
+##4.1 Full dataset
+```{r}
+all_data <- build_gen_meta(
+  genind_obj = iso_gen,
+  meta       = full.meta
+)
+
+gen_all  <- all_data$gen
+meta_all <- all_data$meta
+
+dim(gen_all)
+#[1]   185 12497
+```
+
+##4.2 Host cluster IC1
+```{r}
+IC1_data <- build_gen_meta(
+  genind_obj = iso_gen,
+  meta       = full.meta %>% filter(HostCluster == "IC1")
+)
+
+gen_IC1  <- IC1_data$gen
+meta_IC1 <- IC1_data$meta
+
+dim(gen_IC1)
+#   64 6936
+```
+
+##4.3 Host cluster IC2
+```{r}
+IC2_data <- build_gen_meta(
+  genind_obj = iso_gen,
+  meta       = full.meta %>% filter(HostCluster == "IC2")
+)
+
+gen_IC2  <- IC2_data$gen
+meta_IC2 <- IC2_data$meta
+
+dim(gen_IC2)
+# 38 7569
+```
+
+##4.3 Host cluster IC3
+```{r}
+IC3_data <- build_gen_meta(
+  genind_obj = iso_gen,
+  meta       = full.meta %>% filter(HostCluster == "IC3")
+)
+
+gen_IC3  <- IC3_data$gen
+meta_IC3 <- IC3_data$meta
+
+dim(gen_IC3)
+#[1]   83 9063
+```
+
+#5. Sanity check for all genetic matrices
+```{r}
+summary(apply(gen_all, 2, var))
+summary(apply(gen_IC1, 2, var))
+summary(apply(gen_IC2, 2, var))
+summary(apply(gen_IC3, 2, var))
+```
+
+```{r}
+library(vegan)
+
+run_gea_rda <- function(gen, meta, nperm = 99) {
+
+  ## -----------------------------
+  ## 1. Fit RDA with environmental variables
+  ## -----------------------------
+  rda_mod <- rda(
+    gen ~ Depth + DHW_me_002 + SST_sd_002 + SCV_me_002,
+    data = meta
+  )
+
+  ## -----------------------------
+  ## 2. Optional bICkward selection
+  ## -----------------------------
+  # Stepwise selection using permutations
+  rda_sel <- ordistep(
+    rda_mod,
+    direction = "bICkward",
+    permutations = nperm
+  )
+
+  ## -----------------------------
+  ## 3. Test overall significance of RDA
+  ## -----------------------------
+  rda_overall_sig <- anova(rda_sel, permutations = nperm)
+
+  ## -----------------------------
+  ## 4. Test significance of individual enviro variables
+  ## -----------------------------
+  rda_terms_sig <- anova(rda_sel, by = "term", permutations = nperm)
+
+  ## -----------------------------
+  ## 5. ExtrICt SNP loadings
+  ## -----------------------------
+  loadings <- summary(rda_sel)$species[, 1:2, drop = FALSE]
+
+  get_outliers <- function(x, z = 2.5) {
+    lim <- mean(x) + c(-1, 1) * z * sd(x)
+    names(x[x < lim[1] | x > lim[2]])
+  }
+
+  cand <- unique(c(
+    get_outliers(loadings[, 1]),
+    get_outliers(loadings[, 2])
+  ))
+
+  ## -----------------------------
+  ## 6. Return results as a list
+  ## -----------------------------
+  list(
+    rda           = rda_sel,        # RDA model after selection
+    candidates    = cand,           # candidate SNPs
+    Rsq           = RsquareAdj(rda_sel),  # adjusted R^2
+    loadings      = loadings,       # SNP loadings
+    anova_overall = rda_overall_sig,   # overall RDA significance
+    anova_terms   = rda_terms_sig      # per-term significance
+  )
+}
+```
+
+```{r}
+c("Depth", "DHW_me_002", "SST_sd_002", "SCV_me_002") %in% colnames(meta_all)
+#make sure this returns TRUE for all 
+```
+
+```{r}
+gea_all <- run_gea_rda(gen_all, meta_all)
+gea_IC1 <- run_gea_rda(gen_IC1, meta_IC1)
+gea_IC2 <- run_gea_rda(gen_IC2, meta_IC2)
+gea_IC3 <- run_gea_rda(gen_IC3, meta_IC3)
+
+```
+
+```{r}
+# Adjusted R²
+gea_all$Rsq #0.2469014
+gea_IC1$Rsq #0.1317304
+gea_IC2$Rsq #0.1059666
+gea_IC3$Rsq #0.09652213
+
+# Number of candidate SNPs
+length(gea_all$candidates) #1140
+length(gea_IC1$candidates) #448
+length(gea_IC2$candidates) #498
+length(gea_IC3$candidates) # 687
+
+# Per-variable p-values
+gea_all$anova_terms
+#            Df Variance       F Pr(>F)   
+#Depth        1   130.07 11.1528   0.01 **
+#DHW_me_002   1   443.01 37.9856   0.01 **
+#SST_sd_002   1   109.18  9.3615   0.01 **
+#SCV_me_002   1    67.92  5.8240   0.01 **
+#Residual   180  2099.26     
+
+gea_IC1$anova_terms
+#           Df Variance      F Pr(>F)   
+#SST_sd_002  1   173.62 9.1927   0.01 **
+#SCV_me_002  1    44.68 2.3655   0.01 **
+#Residual   61  1152.10  
+
+gea_IC2$anova_terms
+#           Df Variance      F Pr(>F)   
+#Depth       1   113.06 2.3355   0.04 * 
+#DHW_me_002  1    69.00 1.4254   0.12   
+#SCV_me_002  1   175.46 3.6246   0.01 **
+#Residual   34  1645.90         
+
+gea_IC3$anova_terms
+#           Df Variance      F Pr(>F)   
+#Depth       1    40.35 2.1368   0.01 **
+#DHW_me_002  1   106.32 5.6297   0.01 **
+#SST_sd_002  1    55.23 2.9245   0.01 **
+#SCV_me_002  1    39.08 2.0694   0.01 **
+#Residual   78  1473.08       
+```
+
+
+```{r}
+# ExtrICt candidate loci
+load.rda <- summary(gea_all$rda)$species[,1:2]  # only RDA1 & RDA2
+hist(load.rda[,1], main="Loadings on RDA1 (ALL)")
+hist(load.rda[,2], main="Loadings on RDA2 (ALL)")
+
+# Outliers function
+outliers <- function(x, z){
+  lims <- mean(x) + c(-1, 1) * z * sd(x)
+  x[x < lims[1] | x > lims[2]]
+}
+
+cand1 <- outliers(load.rda[,1], 2.5)
+cand2 <- outliers(load.rda[,2], 2.5)
+ICro.rda.cand <- unique(c(names(cand1), names(cand2)))
+
+meta2 <- meta_all %>% dplyr::select(Depth, DHW_me_002, SST_sd_002, SCV_me_002)
+
+cand <- data.frame(snp = ICro.rda.cand, stringsAsFICtors = FALSE)
+cand <- subset(cand, snp %in% colnames(gen_all))
+
+cor_matrix <- matrix(nrow = nrow(cand), ncol = ncol(meta2))
+colnames(cor_matrix) <- colnames(meta2)
+
+for (i in 1:nrow(cand)) {
+  snp_name <- cand$snp[i]
+  snp_gen <- gen_all[, snp_name]
+  cor_matrix[i, ] <- sapply(1:ncol(meta2), function(j)
+    cor(as.numeric(meta2[, j]), as.numeric(snp_gen)))
+}
+
+cand <- cbind.data.frame(cand, cor_matrix)
+cand <- cand[!duplicated(cand$snp),]
+
+cand$predictor <- apply(cand[, 2:5], 1, function(x) names(which.max(abs(x))))
+cand$correlation <- apply(cand[, 2:5], 1, function(x) max(abs(x)))
+
+# Color coding
+cols <- rep(adjustcolor('grey', 0.5), times = ncol(gen_all))
+names(cols) <- colnames(gen_all)
+cols[cand$snp[cand$predictor == 'Depth']] <- '#A7226E'
+cols[cand$snp[cand$predictor == 'DHW_me_002']] <- '#EC2049'
+cols[cand$snp[cand$predictor == 'SCV_me_002']] <- '#F26B38'
+cols[cand$snp[cand$predictor == 'SST_sd_002']] <- '#E1F5C4'
+
+# Plot
+plot(gea_all$rda, type="n", scaling = 3, xlim = c(-1,1), ylim = c(-1,1))
+points(gea_all$rda, display = "species", pch = 21, cex = 1, col = "gray32", bg = cols, scaling = 3)
+text(gea_all$rda, scaling = 3, display = "bp", col = "#0868IC", cex = 1)
+legend("bottomright", legend = c("Depth", "DHW mean", "SCV mean", "SST var"),  
+       bty = "n", col = "gray32", pch = 21, cex = 1, pt.bg = c('#A7226E',"#EC2049", "#F26B38", '#E1F5C4'))
+```
+
+
+```{r}
+load.rda <- summary(gea_IC1$rda)$species[,1:2]
+hist(load.rda[,1], main="Loadings on RDA1 (IC1)")
+hist(load.rda[,2], main="Loadings on RDA2 (IC1)")
+
+cand1 <- outliers(load.rda[,1], 2.5)
+cand2 <- outliers(load.rda[,2], 2.5)
+ICro.rda.cand <- unique(c(names(cand1), names(cand2)))
+
+meta2 <- meta_IC1 %>% dplyr::select(Depth, DHW_me_002, SST_sd_002, SCV_me_002)
+
+cand <- data.frame(snp = ICro.rda.cand, stringsAsFICtors = FALSE)
+cand <- subset(cand, snp %in% colnames(gen_IC1))
+
+cor_matrix <- matrix(nrow = nrow(cand), ncol = ncol(meta2))
+colnames(cor_matrix) <- colnames(meta2)
+
+for (i in 1:nrow(cand)) {
+  snp_name <- cand$snp[i]
+  snp_gen <- gen_IC1[, snp_name]
+  cor_matrix[i, ] <- sapply(1:ncol(meta2), function(j)
+    cor(as.numeric(meta2[, j]), as.numeric(snp_gen)))
+}
+
+cand <- cbind.data.frame(cand, cor_matrix)
+cand <- cand[!duplicated(cand$snp),]
+
+cand$predictor <- apply(cand[, 2:5], 1, function(x) names(which.max(abs(x))))
+cand$correlation <- apply(cand[, 2:5], 1, function(x) max(abs(x)))
+
+cols <- rep(adjustcolor('grey', 0.5), times = ncol(gen_IC1))
+names(cols) <- colnames(gen_IC1)
+cols[cand$snp[cand$predictor == 'Depth']] <- '#A7226E'
+cols[cand$snp[cand$predictor == 'DHW_me_002']] <- '#EC2049'
+cols[cand$snp[cand$predictor == 'SCV_me_002']] <- '#F26B38'
+cols[cand$snp[cand$predictor == 'SST_sd_002']] <- '#E1F5C4'
+
+plot(gea_IC1$rda, type="n", scaling = 3, xlim = c(-1,1), ylim = c(-1,1))
+points(gea_IC1$rda, display = "species", pch = 21, cex = 1, col = "gray32", bg = cols, scaling = 3)
+text(gea_IC1$rda, scaling = 3, display = "bp", col = "#0868IC", cex = 1)
+legend("bottomright", legend = c("Depth", "DHW mean", "SCV mean", "SST var"),  
+       bty = "n", col = "gray32", pch = 21, cex = 1, pt.bg = c('#A7226E',"#EC2049", "#F26B38", '#E1F5C4'))
+```
+
+
+```{r}
+load.rda <- summary(gea_IC2$rda)$species[,1:2]
+hist(load.rda[,1], main="Loadings on RDA1 (IC2)")
+hist(load.rda[,2], main="Loadings on RDA2 (IC2)")
+
+cand1 <- outliers(load.rda[,1], 2.5)
+cand2 <- outliers(load.rda[,2], 2.5)
+ICro.rda.cand <- unique(c(names(cand1), names(cand2)))
+
+meta2 <- meta_IC2 %>% dplyr::select(Depth, DHW_me_002, SST_sd_002, SCV_me_002)
+
+cand <- data.frame(snp = ICro.rda.cand, stringsAsFICtors = FALSE)
+cand <- subset(cand, snp %in% colnames(gen_IC2))
+
+cor_matrix <- matrix(nrow = nrow(cand), ncol = ncol(meta2))
+colnames(cor_matrix) <- colnames(meta2)
+
+for (i in 1:nrow(cand)) {
+  snp_name <- cand$snp[i]
+  snp_gen <- gen_IC2[, snp_name]
+  cor_matrix[i, ] <- sapply(1:ncol(meta2), function(j)
+    cor(as.numeric(meta2[, j]), as.numeric(snp_gen)))
+}
+
+cand <- cbind.data.frame(cand, cor_matrix)
+cand <- cand[!duplicated(cand$snp),]
+
+cand$predictor <- apply(cand[, 2:5], 1, function(x) names(which.max(abs(x))))
+cand$correlation <- apply(cand[, 2:5], 1, function(x) max(abs(x)))
+
+cols <- rep(adjustcolor('grey', 0.5), times = ncol(gen_IC2))
+names(cols) <- colnames(gen_IC2)
+cols[cand$snp[cand$predictor == 'Depth']] <- '#A7226E'
+cols[cand$snp[cand$predictor == 'DHW_me_002']] <- '#EC2049'
+cols[cand$snp[cand$predictor == 'SCV_me_002']] <- '#F26B38'
+cols[cand$snp[cand$predictor == 'SST_sd_002']] <- '#E1F5C4'
+
+plot(gea_IC2$rda, type="n", scaling = 3, xlim = c(-1,1), ylim = c(-1,1))
+points(gea_IC2$rda, display = "species", pch = 21, cex = 1, col = "gray32", bg = cols, scaling = 3)
+text(gea_IC2$rda, scaling = 3, display = "bp", col = "#0868IC", cex = 1)
+legend("bottomright", legend = c("Depth", "DHW mean", "SCV mean", "SST var"),  
+       bty = "n", col = "gray32", pch = 21, cex = 1, pt.bg = c('#A7226E',"#EC2049", "#F26B38", '#E1F5C4'))
+```
+
+```{r}
+load.rda <- summary(gea_IC3$rda)$species[,1:2]
+hist(load.rda[,1], main="Loadings on RDA1 (IC3)")
+hist(load.rda[,2], main="Loadings on RDA2 (IC3)")
+
+cand1 <- outliers(load.rda[,1], 2.5)
+cand2 <- outliers(load.rda[,2], 2.5)
+ICro.rda.cand <- unique(c(names(cand1), names(cand2)))
+
+meta2 <- meta_IC3 %>% dplyr::select(Depth, DHW_me_002, SST_sd_002, SCV_me_002)
+
+cand <- data.frame(snp = ICro.rda.cand, stringsAsFICtors = FALSE)
+cand <- subset(cand, snp %in% colnames(gen_IC3))
+
+cor_matrix <- matrix(nrow = nrow(cand), ncol = ncol(meta2))
+colnames(cor_matrix) <- colnames(meta2)
+
+for (i in 1:nrow(cand)) {
+  snp_name <- cand$snp[i]
+  snp_gen <- gen_IC3[, snp_name]
+  cor_matrix[i, ] <- sapply(1:ncol(meta2), function(j)
+    cor(as.numeric(meta2[, j]), as.numeric(snp_gen)))
+}
+
+cand <- cbind.data.frame(cand, cor_matrix)
+cand <- cand[!duplicated(cand$snp),]
+
+cand$predictor <- apply(cand[, 2:5], 1, function(x) names(which.max(abs(x))))
+cand$correlation <- apply(cand[, 2:5], 1, function(x) max(abs(x)))
+
+cols <- rep(adjustcolor('grey', 0.5), times = ncol(gen_IC3))
+names(cols) <- colnames(gen_IC3)
+cols[cand$snp[cand$predictor == 'Depth']] <- '#A7226E'
+cols[cand$snp[cand$predictor == 'DHW_me_002']] <- '#EC2049'
+cols[cand$snp[cand$predictor == 'SCV_me_002']] <- '#F26B38'
+cols[cand$snp[cand$predictor == 'SST_sd_002']] <- '#E1F5C4'
+
+plot(gea_IC3$rda, type="n", scaling = 3, xlim = c(-1,1), ylim = c(-1,1))
+points(gea_IC3$rda, display = "species", pch = 21, cex = 1, col = "gray32", bg = cols, scaling = 3)
+text(gea_IC3$rda, scaling = 3, display = "bp", col = "#0868IC", cex = 1)
+legend("bottomright", legend = c("Depth", "DHW mean", "SCV mean", "SST var"),  
+       bty = "n", col = "gray32", pch = 21, cex = 1, pt.bg = c('#A7226E',"#EC2049", "#F26B38", '#E1F5C4'))
+```
+
+
+```{r}
+library(ggplot2)
+library(grid)
+library(dplyr)
+library(ggrepel)
+library(patchwork)
+
+# ------------------------------
+# Helper function for single RDA plot
+# ------------------------------
+make_single_rda_plot <- function(gea_result, gen_matrix, meta_matrix, title = "", show_legend = FALSE) {
+
+  # Candidate SNPs
+  load.rda <- summary(gea_result$rda)$species[,1:2]
+  outliers <- function(x, z = 2.5) {
+    lims <- mean(x) + c(-1,1) * z * sd(x)
+    x[x < lims[1] | x > lims[2]]
+  }
+  cand1 <- outliers(load.rda[,1])
+  cand2 <- outliers(load.rda[,2])
+  cand_snps <- unique(c(names(cand1), names(cand2)))
+
+  meta2 <- meta_matrix %>% dplyr::select(Depth, DHW_me_002, SST_sd_002, SCV_me_002)
+
+  cand <- data.frame(snp = cand_snps, stringsAsFICtors = FALSE)
+  cand <- subset(cand, snp %in% colnames(gen_matrix))
+
+  # Correlations
+  cor_matrix <- matrix(nrow = nrow(cand), ncol = ncol(meta2))
+  colnames(cor_matrix) <- colnames(meta2)
+  for (i in 1:nrow(cand)) {
+    snp_name <- cand$snp[i]
+    snp_gen <- gen_matrix[, snp_name]
+    cor_matrix[i, ] <- sapply(1:ncol(meta2), function(j) cor(as.numeric(meta2[, j]), as.numeric(snp_gen)))
+  }
+
+  cand <- cbind.data.frame(cand, cor_matrix)
+  cand$predictor <- apply(cand[, 2:5], 1, function(x) names(which.max(abs(x))))
+
+  # Color coding
+  predictor_colors <- c(
+    "Depth" = '#A7226E',
+    "DHW_me_002" = '#EC2049',
+    "SCV_me_002" = '#F26B38',
+    "SST_sd_002" = '#E1F5C4'
+  )
+  cols <- rep(adjustcolor('grey', 0.5), times = ncol(gen_matrix))
+  names(cols) <- colnames(gen_matrix)
+  for (pred in names(predictor_colors)) {
+    cols[cand$snp[cand$predictor == pred]] <- predictor_colors[pred]
+  }
+
+  # Scores
+  species_scores <- scores(gea_result$rda, display = "species", scaling = 3)
+  env_scores <- scores(gea_result$rda, display = "bp", scaling = 3)
+  arrow_multiplier <- 0.8 * max(abs(species_scores)) / max(abs(env_scores))
+  env_scores_scaled <- env_scores * arrow_multiplier
+
+  species_df <- as.data.frame(species_scores) %>% mutate(Species = rownames(.), fill = cols)
+  env_df <- as.data.frame(env_scores_scaled) %>% mutate(Env = rownames(.))
+
+  # Variance explained
+  var_expl <- summary(gea_result$rda)$cont$importance
+  axis1_var <- round(var_expl[2,1]*100,1)
+  axis2_var <- round(var_expl[2,2]*100,1)
+
+  # Dynamic axis limits
+  all_vals <- c(species_df$RDA1, species_df$RDA2, env_df$RDA1, env_df$RDA2)
+  axis_lim <- max(abs(all_vals)) * 1.1  # 10% padding
+
+  # Nudges for arrows
+  env_df <- env_df %>%
+    mutate(
+      Env = recode(Env,
+                   "DHW_me_002" = "Mean DHW",
+                   "SCV_me_002" = "Mean SCV",
+                   "SST_sd_002" = "Var SST",
+                   "Depth" = "Depth"),
+      nudge_x = ifelse(RDA1 >= 0, 0.05*axis_lim, -0.05*axis_lim),
+      nudge_y = ifelse(RDA2 >= 0, 0.05*axis_lim, -0.05*axis_lim)
+    )
+
+  # Plot
+  p <- ggplot() +
+    geom_point(data = species_df, aes(x = RDA1, y = RDA2, fill = fill),
+               shape = 21, size = 3, color = "gray32") +
+    geom_segment(data = env_df, aes(x = 0, y = 0, xend = RDA1, yend = RDA2),
+                 arrow = arrow(length = unit(0.2,"cm")), color = "black", linewidth = 0.5) +
+    geom_text_repel(data = env_df, aes(x = RDA1, y = RDA2, label = Env),
+                    nudge_x = env_df$nudge_x, nudge_y = env_df$nudge_y,
+                    color = "black", size = 4, seed = 42) +
+    scale_fill_identity(
+      guide = if(show_legend) "legend" else "none",
+      labels = if(show_legend) c("Depth", "Mean DHW", "Mean SCV", "Var SST") else NULL,
+      breaks = if(show_legend) predictor_colors else NULL,
+      name = if(show_legend) "Top Predictor" else NULL
+    ) +
+    coord_fixed(xlim = c(-axis_lim, axis_lim), ylim = c(-axis_lim, axis_lim)) +
+    theme_minimal() +
+    theme(panel.grid = element_blank(),
+          axis.line = element_line(color = "black"),
+          legend.position = if(show_legend) c(1.3, 1.0) else "none",
+          legend.justification = c("right", "top"),
+          legend.direction = "vertical",
+          legend.bICkground = if(show_legend) element_rect(fill = "white", color = "black") else element_blank(),
+          legend.title = element_text(size = 10),
+          legend.text = element_text(size = 9)
+    ) +
+    xlab(paste0("RDA1 (", axis1_var, "%)")) +
+    ylab(paste0("RDA2 (", axis2_var, "%)")) +
+    ggtitle(title)
+
+  return(p)
+}
+
+# ------------------------------
+# Make plots
+# ------------------------------
+rda_all_plot <- make_single_rda_plot(gea_all, gen_all, meta_all, title = "ALL samples", show_legend = FALSE)
+rda_IC1_plot  <- make_single_rda_plot(gea_IC1, gen_IC1, meta_IC1, title = "Host Cluster IC1", show_legend = FALSE)
+rda_IC2_plot  <- make_single_rda_plot(gea_IC2, gen_IC2, meta_IC2, title = "Host Cluster IC2", show_legend = FALSE)
+rda_IC3_plot  <- make_single_rda_plot(gea_IC3, gen_IC3, meta_IC3, title = "Host Cluster IC3", show_legend = TRUE)
+
+
+# ------------------------------
+# Combine side by side
+# ------------------------------
+library(ggplot2)
+library(gridExtra)
+
+# -------------------------------
+# 1. Make legend-only plot
+# -------------------------------
+legend_df <- data.frame(
+  Predictor = c("Depth", "Mean DHW", "Mean SCV", "Var SST"),
+  x = 1:4, y = 1:4,  # dummy coordinates
+  fill = c('#A7226E', '#EC2049', '#F26B38', '#E1F5C4')
+)
+
+legend_plot <- ggplot(legend_df, aes(x = x, y = y, fill = fill)) +
+  geom_point(shape = 21, size = 5) +
+  scale_fill_identity(name = "Top Predictor",
+                      labels = legend_df$Predictor,
+                      guide = "legend") +
+  theme_void() +
+  theme(
+    legend.position = "right",
+    legend.key.size = unit(1, "lines"),
+    legend.text = element_text(size = 10),
+    legend.title = element_text(size = 12, face = "bold")
+  )
+
+# -------------------------------
+# 2. Remove legends from RDA plots
+# -------------------------------
+rda_all_plot_noleg <- rda_all_plot + theme(legend.position = "none")
+rda_IC1_plot_noleg <- rda_IC1_plot + theme(legend.position = "none")
+rda_IC2_plot_noleg <- rda_IC2_plot + theme(legend.position = "none")
+rda_IC3_plot_noleg <- rda_IC3_plot + theme(legend.position = "none")
+
+
+# -------------------------------
+# 3. Arrange plots side by side with legend
+# -------------------------------
+grid.arrange(
+  rda_all_plot_noleg,
+  rda_IC1_plot_noleg,
+  rda_IC2_plot_noleg,
+  rda_IC3_plot_noleg,
+  legend_plot,
+  ncol = 5,
+  widths = c(1,1,1,1,0.4)  # make legend narrower
+)
+```
+
+
+
