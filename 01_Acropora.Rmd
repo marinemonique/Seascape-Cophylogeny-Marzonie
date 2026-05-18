@@ -749,7 +749,7 @@ library(scales)
 
 ```{r}
 # Load genind data
-```{r}
+
 load("acro_gen_full.RData")
 load("acro_gen_cl1.RData")
 load("acro_gen_cl2.RData")
@@ -1030,11 +1030,16 @@ enviro <- read.csv("reef_summary.csv") %>%
          decade_mean_DHW, decade_max_DHW, decade_sd_DHW,
          decade_mean_SST, decade_max_SST, decade_sd_SST,
          )
-enviro_long <- enviro %>%
-  pivot_longer(cols = 5:28, names_to = "Variable", values_to = "Value")
 
-enviro <- read.csv("enviro.csv") %>% 
-  rename(Reef = POI_ID)
+RECIEFS_enviro <- read.csv("enviro_meta_RECIEFS.csv")
+RECIEFS_enviro <- RECIEFS_enviro |> dplyr::select(POI_ID, SCV_me_002) |> rename(Reef = POI_ID)
+
+enviro_join <- left_join(enviro, RECIEFS_enviro)
+
+enviro_long <- enviro_join |> tidyr::pivot_longer(cols = 5:29, names_to = "Variable", values_to = "Value")
+
+# enviro <- read.csv("enviro.csv") %>% 
+#   rename(Reef = POI_ID)
 load("ind_coords.RData")
 
 ind_coords_gea <- ind_coords %>%
@@ -1053,7 +1058,7 @@ meta_clean <- read.csv("meta_clean.csv")
 
 full.meta <- meta_clean %>% 
   left_join(ind_coords_gea, by = "SampleID") %>% 
-  left_join(enviro, by = "Reef") %>% 
+  left_join(enviro_join, by = "Reef") %>% 
   na.omit() %>%
   #column_to_rownames("SampleID") %>%
   select(-Reference, -Site, -Date, -Bag, -Species,
@@ -1168,7 +1173,7 @@ run_gea_rda <- function(gen, meta, nperm = 99) {
   ## -----------------------------
   rda_mod <- rda(
     #gen ~ Depth + DHW_me_002 + SST_sd_002 + SCV_me_002, #going to need to change this to include the actual things I extracted
-    gen ~ Depth + mean_DHW_19_24 + sd_SST_19_24 + historic_mean_SST + historic_mean_DHW,
+    gen ~ Depth + month_mean_SST +month_mean_DHW +  + historic_mean_SST + historic_mean_DHW + SCV_me_002,
     data = meta
   )
 
