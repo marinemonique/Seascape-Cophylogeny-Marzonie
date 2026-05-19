@@ -1017,26 +1017,11 @@ Environmental data here was extracted in the RMarkdown called 06_Environmental_D
 
 ```{r}
 # 1.2 Load environmental data
-enviro <- read.csv("reef_summary.csv") %>%
-  rename(Reef = POI_ID) %>%
-  mutate(Reef = as.factor(Reef)) %>%
-  select(Reef, year, month, week,
-         week_mean_DHW, week_max_DHW, week_sd_DHW,
-         week_mean_SST, week_max_SST, week_sd_SST,
-         month_mean_DHW, month_max_DHW, month_sd_DHW,
-         month_mean_SST, month_max_SST, month_sd_SST,
-         annual_mean_DHW, annual_max_DHW, annual_sd_DHW,
-         annual_mean_SST, annual_max_SST, annual_sd_SST,
-         decade_mean_DHW, decade_max_DHW, decade_sd_DHW,
-         decade_mean_SST, decade_max_SST, decade_sd_SST,
-         )
 
-RECIEFS_enviro <- read.csv("enviro_meta_RECIEFS.csv")
-RECIEFS_enviro <- RECIEFS_enviro |> dplyr::select(POI_ID, SCV_me_002) |> rename(Reef = POI_ID)
+enviro <- read.csv("enviro_mw.csv")
+enviro <- enviro |> rename(Reef = "POI_ID")
 
-enviro_join <- left_join(enviro, RECIEFS_enviro)
-
-enviro_long <- enviro_join |> tidyr::pivot_longer(cols = 5:29, names_to = "Variable", values_to = "Value")
+enviro_long <- enviro |> tidyr::pivot_longer(cols = 3:21, names_to = "Variable", values_to = "Value")
 
 # enviro <- read.csv("enviro.csv") %>% 
 #   rename(Reef = POI_ID)
@@ -1058,7 +1043,7 @@ meta_clean <- read.csv("meta_clean.csv")
 
 full.meta <- meta_clean %>% 
   left_join(ind_coords_gea, by = "SampleID") %>% 
-  left_join(enviro_join, by = "Reef") %>% 
+  left_join(enviro, by = "Reef") %>% 
   na.omit() %>%
   #column_to_rownames("SampleID") %>%
   select(-Reference, -Site, -Date, -Bag, -Species,
@@ -1075,8 +1060,8 @@ table(full.meta$HostCluster)
 ```
 
 When I run this, I get 
- AC1    AC2 
-121235 723475 
+AC1 AC2 
+51  304
 
 ```{r}
 build_gen_meta <- function(genind_obj, meta) {
@@ -1173,7 +1158,8 @@ run_gea_rda <- function(gen, meta, nperm = 99) {
   ## -----------------------------
   rda_mod <- rda(
     #gen ~ Depth + DHW_me_002 + SST_sd_002 + SCV_me_002, #going to need to change this to include the actual things I extracted
-    gen ~ Depth + month_mean_SST +month_mean_DHW +  + historic_mean_SST + historic_mean_DHW + SCV_me_002,
+    gen ~ Depth + max_DHW_15_24 +mean_DHW_15_24+ sd_DHW_15_24 + max_SST_15_24 + mean_SST_15_24 + sd_SST_15_24 + mean_SST_19_24 + mean_DHW_19_24 + sd_SST_19_24 + sd_DHW_19_24  + historic_mean_SST + historic_mean_DHW + historic_sd_DHW +historic_sd_SST +
+        SCV_me_002,
     data = meta
   )
 
@@ -1237,7 +1223,7 @@ gea_AC1 <- run_gea_rda(gen_AC1, meta_AC1)
 gea_AC2 <- run_gea_rda(gen_AC2, meta_AC2)
 ```
 
-
+Came up with a warning (Some constraints or conditions were aliased because they were redundant. This can happen if terms are constant or linearly dependent (Collinear): historic sd SST and SCV me 002)
 ```{r}
 # Adjusted R²
 gea_all$Rsq 
