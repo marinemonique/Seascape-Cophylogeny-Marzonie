@@ -287,12 +287,12 @@ wgs_samples <- c(
 
 library(dplyr)
 
-ind_coords <- ind_coords %>%
+ind_coords_iso <- ind_coords_iso %>%
   mutate(WGS_group = if_else(SampleID %in% wgs_samples,
                              SampleID,
                              "Other"))
 
-ind_coords <- ind_coords %>%
+ind_coords_iso <- ind_coords_iso %>%
   mutate(
     WGS_flag = SampleID %in% wgs_samples,
     SampleID_ordered = factor(SampleID, levels = wgs_samples)
@@ -303,11 +303,11 @@ ind_coords <- ind_coords %>%
 library(ggplot2)
 library(ggrepel)
 
-ggplot(ind_coords, aes(x = Axis1, y = Axis2)) +
+ggplot(ind_coords_iso, aes(x = Axis1, y = Axis2)) +
   
   # Grey background first
   geom_point(
-    data = subset(ind_coords, !WGS_flag),
+    data = subset(ind_coords_iso, !WGS_flag),
     color = "grey85",
     size = 3,
     alpha = 0.6
@@ -315,14 +315,14 @@ ggplot(ind_coords, aes(x = Axis1, y = Axis2)) +
   
   # WGS samples on top (default ggplot palette)
   geom_point(
-    data = subset(ind_coords, WGS_flag),
+    data = subset(ind_coords_iso, WGS_flag),
     aes(color = SampleID_ordered),
     size = 4
   ) +
   
   # Labels
   geom_text_repel(
-    data = subset(ind_coords, WGS_flag),
+    data = subset(ind_coords_iso, WGS_flag),
     aes(label = SampleID, color = SampleID_ordered),
     size = 3.5,
     show.legend = FALSE
@@ -410,14 +410,14 @@ inds_IC2 <- ind_coords_iso$SampleID[ind_coords_iso$HostCluster == "IC2"]
 inds_IC3 <- ind_coords_iso$SampleID[ind_coords_iso$HostCluster == "IC3"]
 
 # Subset the genind object for each species
-iso_gen_cl1 <- iso_gen_full[inds_IC1, ]
-iso_gen_cl2 <- iso_gen_full[inds_IC2, ]
-iso_gen_cl3 <- iso_gen_full[inds_IC3, ]
+iso_gen_IC1 <- iso_gen_full[inds_IC1, ]
+iso_gen_IC2 <- iso_gen_full[inds_IC2, ]
+iso_gen_IC3 <- iso_gen_full[inds_IC3, ]
 
 
-save(iso_gen_cl1, file = "iso_gen_cl1.RData")
-save(iso_gen_cl2, file = "iso_gen_cl2.RData")
-save(iso_gen_cl3, file = "iso_gen_cl3.RData")
+save(iso_gen_IC1, file = "iso_gen_IC1.RData")
+save(iso_gen_IC2, file = "iso_gen_IC2.RData")
+save(iso_gen_IC3, file = "iso_gen_IC3.RData")
 
 ```
 ```{r}
@@ -505,28 +505,28 @@ pca.symbiont
 ##2.2 Run PCA for LH and CS 
 ```{r}
 # PCA for Lord Howe
-x_cl1 <- tab(iso_gen_cl1 , NA.method = "mean") #issue that PCA requires non-zero variance, and suggests that loci are monomorphic.
+x_IC1 <- tab(iso_gen_IC1 , NA.method = "mean") #issue that PCA requires non-zero variance, and suggests that loci are monomorphic.
 
 #for PCA to work the var cannot be 0
-var_cols <- apply(x_cl1, 2, var, na.rm = TRUE)
+var_cols <- apply(x_IC1, 2, var, na.rm = TRUE)
 sum(var_cols == 0, na.rm=TRUE)  # monomorphic loci
 
 
 # remove loci with zero variance (to get PCA to work)
-x_cl1 <- x_cl1[, !is.na(var_cols) & var_cols > 0]
+x_IC1 <- x_IC1[, !is.na(var_cols) & var_cols > 0]
 
-pca_cl1 <- dudi.pca(x_cl1, scannf = FALSE, scale = FALSE, nf = 3)
+pca_IC1 <- dudi.pca(x_IC1, scannf = FALSE, scale = FALSE, nf = 3)
 # # check for remaining NA 
-# sum(is.na(x_cl1))
+# sum(is.na(x_IC1))
 
 # PCA for Coral Sea 
-x_cl2 <- tab(iso_gen_cl2, NA.method = "mean")
-pca_cl2 <- dudi.pca(x_cl2, scannf = FALSE, scale = FALSE, nf = 3)
+x_IC2 <- tab(iso_gen_IC2, NA.method = "mean")
+pca_IC2 <- dudi.pca(x_IC2, scannf = FALSE, scale = FALSE, nf = 3)
 
 
 # IC3
-x_cl3 <- tab(iso_gen_cl3, NA.method = "mean")
-pca_cl3 <- dudi.pca(x_cl3, scannf = FALSE, scale = FALSE, nf = 3)
+x_IC3 <- tab(iso_gen_IC3, NA.method = "mean")
+pca_IC3 <- dudi.pca(x_IC3, scannf = FALSE, scale = FALSE, nf = 3)
 ```
 ##2.3 Merge coords and meta
 ```{r}
@@ -534,40 +534,40 @@ pca_cl3 <- dudi.pca(x_cl3, scannf = FALSE, scale = FALSE, nf = 3)
 meta_ordered_iso <- load("meta_ordered_iso.RData")
 
 # For CL1
-ind_coords_cl1 <- as.data.frame(pca_cl1$li)
-ind_coords_cl1$SampleID <- rownames(ind_coords_cl1)
-ind_coords_cl1 <- left_join(ind_coords_cl1, meta_ordered, by = "SampleID")
-save(ind_coords_cl1, file = "ind_coords_cl1.RData")
-# For CL2
-ind_coords_cl2 <- as.data.frame(pca_cl2$li)
-ind_coords_cl2$SampleID <- rownames(ind_coords_cl2)
-ind_coords_cl2 <- left_join(ind_coords_cl2, meta_ordered, by = "SampleID")
-save(ind_coords_cl2, file = "ind_coords_cl2.RData")
+ind_coords_IC1 <- as.data.frame(pca_IC1$li)
+ind_coords_IC1$SampleID <- rownames(ind_coords_IC1)
+ind_coords_IC1 <- left_join(ind_coords_IC1, meta_ordered, by = "SampleID")
+save(ind_coords_IC1, file = "ind_coords_IC1.RData")
+# For IC2
+ind_coords_IC2 <- as.data.frame(pca_IC2$li)
+ind_coords_IC2$SampleID <- rownames(ind_coords_IC2)
+ind_coords_IC2 <- left_join(ind_coords_IC2, meta_ordered, by = "SampleID")
+save(ind_coords_IC2, file = "ind_coords_IC2.RData")
 
-# CL3
-ind_coords_cl3 <- as.data.frame(pca_cl3$li)
-ind_coords_cl3$SampleID <- rownames(ind_coords_cl3)
-ind_coords_cl3 <- left_join(ind_coords_cl3, meta_ordered, by = "SampleID")
-save(ind_coords_cl3, file = "ind_coords_cl3.RData")
+# IC3
+ind_coords_IC3 <- as.data.frame(pca_IC3$li)
+ind_coords_IC3$SampleID <- rownames(ind_coords_IC3)
+ind_coords_IC3 <- left_join(ind_coords_IC3, meta_ordered, by = "SampleID")
+save(ind_coords_IC3, file = "ind_coords_IC3.RData")
 ```
-##2.4 CL1 PCA
+##2.4 IC1 PCA
 ```{r}
 library(tidyverse)
 reef_order <- c("Willis", "Madgelaine", "Herald", "Diamond", "Coringa",
   "Marion", "Mellish", "Frederick", "Saumarez", "Kenn",
   "Wreck", "Cato", "GBR", "Elizabeth", "Middleton")
 
-ind_coords_cl1$Reef <- factor(ind_coords_cl1$Reef, levels = reef_order)
+ind_coords_IC1$Reef <- factor(ind_coords_IC1$Reef, levels = reef_order)
 
-ind_coords_cl1 <- ind_coords_cl1 %>% filter(Reef != "NA") %>% filter(Reef != "GBR") %>% filter(Reef != "Frederick") %>% filter(Reef != "Wreck")
+ind_coords_IC1 <- ind_coords_IC1 %>% filter(Reef != "NA") %>% filter(Reef != "GBR") %>% filter(Reef != "Frederick") %>% filter(Reef != "Wreck")
 
-pca_cl1 <- ggplot(ind_coords_cl1, aes(x = Axis1, y = Axis2, color = Reef)) +
+pca_IC1 <- ggplot(ind_coords_IC1, aes(x = Axis1, y = Axis2, color = Reef)) +
   geom_point(size = 3, alpha = 0.9) +
   geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
   geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
   labs(
-    x = paste0("PC1 (", round(pca_cl1$eig[1] / sum(pca_cl1$eig) * 100, 1), "%)"),
-    y = paste0("PC2 (", round(pca_cl1$eig[2] / sum(pca_cl1$eig) * 100, 1), "%)"),
+    x = paste0("PC1 (", round(pca_IC1$eig[1] / sum(pca_IC1$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca_IC1$eig[2] / sum(pca_IC1$eig) * 100, 1), "%)"),
     color = "Reef"
   ) +
   scale_color_manual(values = reef_palette) +   
@@ -577,27 +577,27 @@ pca_cl1 <- ggplot(ind_coords_cl1, aes(x = Axis1, y = Axis2, color = Reef)) +
     axis.line = element_line(color = "black", linewidth = 0.5)
   )
 
-pca_cl1
+pca_IC1
 ```
 
 
-##2.6 CL2
+##2.6 IC2
 ```{r}
 reef_order <- c("Willis", "Madgelaine", "Herald", "Diamond", "Coringa",
   "Marion", "Mellish", "Frederick", "Saumarez", "Kenn",
   "Wreck", "Cato", "GBR", "Elizabeth", "Middleton")
 
-ind_coords_cl2$Reef <- factor(ind_coords_cl2$Reef, levels = reef_order)
+ind_coords_IC2$Reef <- factor(ind_coords_IC2$Reef, levels = reef_order)
 
-ind_coords_cl2 <- ind_coords_cl2 %>% filter(Reef != "NA")
+ind_coords_IC2 <- ind_coords_IC2 %>% filter(Reef != "NA")
 
-pca_cl2 <- ggplot(ind_coords_cl2, aes(x = Axis1, y = Axis2, color = Reef)) +
+pca_IC2 <- ggplot(ind_coords_IC2, aes(x = Axis1, y = Axis2, color = Reef)) +
   geom_point(size = 3, alpha = 0.9) +
   geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
   geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
   labs(
-    x = paste0("PC1 (", round(pca_cl2$eig[1] / sum(pca_cl2$eig) * 100, 1), "%)"),
-    y = paste0("PC2 (", round(pca_cl2$eig[2] / sum(pca_cl2$eig) * 100, 1), "%)"),
+    x = paste0("PC1 (", round(pca_IC2$eig[1] / sum(pca_IC2$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca_IC2$eig[2] / sum(pca_IC2$eig) * 100, 1), "%)"),
     color = "Reef"
   ) +
   scale_color_manual(values = reef_palette) + 
@@ -607,27 +607,27 @@ pca_cl2 <- ggplot(ind_coords_cl2, aes(x = Axis1, y = Axis2, color = Reef)) +
     axis.line = element_line(color = "black", linewidth = 0.5)
   )
 
-pca_cl2
+pca_IC2
 ```
 
-#CL3
+#IC3
 ```{r}
 library(tidyverse)
 reef_order <- c("Willis", "Madgelaine", "Herald", "Diamond", "Coringa",
   "Marion", "Mellish", "Frederick", "Saumarez", "Kenn",
   "Wreck", "Cato", "GBR", "Elizabeth", "Middleton")
 
-ind_coords_cl3$Reef <- factor(ind_coords_cl3$Reef, levels = reef_order)
+ind_coords_IC3$Reef <- factor(ind_coords_IC3$Reef, levels = reef_order)
 
-ind_coords_cl3 <- ind_coords_cl3 %>% filter(Reef != "NA") %>% filter(Reef != "GBR") %>% filter(Reef != "Frederick") %>% filter(Reef != "Wreck")
+ind_coords_IC3 <- ind_coords_IC3 %>% filter(Reef != "NA") %>% filter(Reef != "GBR") %>% filter(Reef != "Frederick") %>% filter(Reef != "Wreck")
 
-pca_cl3 <- ggplot(ind_coords_cl3, aes(x = Axis1, y = Axis2, color = Reef)) +
+pca_IC3 <- ggplot(ind_coords_IC3, aes(x = Axis1, y = Axis2, color = Reef)) +
   geom_point(size = 3, alpha = 0.9) +
   geom_hline(yintercept = 0, color = "gray30", linewidth = 0.3) +
   geom_vline(xintercept = 0, color = "gray30", linewidth = 0.3) +
   labs(
-    x = paste0("PC1 (", round(pca_cl3$eig[1] / sum(pca_cl3$eig) * 100, 1), "%)"),
-    y = paste0("PC2 (", round(pca_cl3$eig[2] / sum(pca_cl3$eig) * 100, 1), "%)"),
+    x = paste0("PC1 (", round(pca_IC3$eig[1] / sum(pca_IC3$eig) * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pca_IC3$eig[2] / sum(pca_IC3$eig) * 100, 1), "%)"),
     color = "Reef"
   ) +
   scale_color_manual(values = reef_palette) +   
@@ -637,7 +637,7 @@ pca_cl3 <- ggplot(ind_coords_cl3, aes(x = Axis1, y = Axis2, color = Reef)) +
     axis.line = element_line(color = "black", linewidth = 0.5)
   )
 
-pca_cl3
+pca_IC3
 ```
 
 
